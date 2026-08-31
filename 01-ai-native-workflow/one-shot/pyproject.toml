@@ -1,0 +1,18 @@
+[project]
+name = "weekly-feedback"
+version = "0.1.0"
+description = "Generate weekly feedback for projects from their git activity."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+weekly-feedback = "weekly_feedback.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["weekly_feedback"]
