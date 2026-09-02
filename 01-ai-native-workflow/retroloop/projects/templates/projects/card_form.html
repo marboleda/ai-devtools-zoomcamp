@@ -7,6 +7,29 @@
   {{ form.as_p }}
   <button type="submit">Add card</button>
 </form>
+
+<h2>Your cards this cycle</h2>
+{% if own_cards %}
+<ul>
+  {% for card in own_cards %}
+  <li>
+    <strong>{{ card.get_category_display }}:</strong> {{ card.text }}
+    <a href="{% url 'edit_card' project.pk card.pk %}">Edit</a>
+    <form
+      method="post"
+      action="{% url 'withdraw_card' project.pk card.pk %}"
+      onsubmit="return confirm('Withdraw this card? This cannot be undone.');"
+      style="display: inline"
+    >
+      {% csrf_token %}
+      <button type="submit">Withdraw</button>
+    </form>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p>You haven't submitted any cards yet this cycle.</p>
+{% endif %}
 {% else %}
 <p>This cycle is no longer collecting submissions.</p>
 {% endif %}

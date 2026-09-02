@@ -29,3 +29,15 @@ class CardForm(forms.Form):
     # validation error instead of silently truncating it.
     text = forms.CharField(max_length=280, widget=forms.Textarea(attrs={"rows": 2}))
     anonymous = forms.BooleanField(required=False, label="Submit anonymously")
+
+
+class CardEditForm(CardForm):
+    """Same category/text validation as CardForm, with the "submit
+    anonymously" control removed. Editing never changes a card's
+    attribution (#9) — there is no field here that could change it, by
+    construction, not just by convention in the view.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        del self.fields["anonymous"]

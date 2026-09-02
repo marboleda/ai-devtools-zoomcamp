@@ -1,0 +1,10 @@
+<h1>Edit card — {{ project.name }}</h1>
+<p>{{ cycle.week }} — {{ cycle.get_state_display }}</p>
+
+<form method="post">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <button type="submit">Save changes</button>
+</form>
+
+<p><a href="{% url 'create_card' project.pk %}">Back to your cards</a></p>

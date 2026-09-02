@@ -1,12 +1,13 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
 
 from .decorators import facilitator_required
-from .forms import CardForm, JoinProjectForm, ProjectForm
+from .forms import CardEditForm, CardForm, JoinProjectForm, ProjectForm
 from .models import Card, FeedbackCycle, Membership, Project, generate_edit_token, hash_edit_token
 
 # Session key for the {card id (str): plaintext edit token} mapping kept for
@@ -14,6 +15,61 @@ from .models import Card, FeedbackCycle, Membership, Project, generate_edit_toke
 # the Card row (stack.md invariant #1); #9 reads this session entry to let
 # an anonymous contributor edit their own card before the reveal.
 ANONYMOUS_CARD_EDIT_TOKENS_SESSION_KEY = "anonymous_card_edit_tokens"
+
+
+def _anonymous_card_ids_in_session(request):
+    """The card IDs (as ints) this session holds a plaintext edit token
+    for, across every project/cycle the user has ever anonymously
+    submitted to in this session. Callers narrow to one cycle themselves.
+    """
+    tokens = request.session.get(ANONYMOUS_CARD_EDIT_TOKENS_SESSION_KEY, {})
+    ids = []
+    for raw_pk in tokens:
+        try:
+            ids.append(int(raw_pk))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _own_cards_for_cycle(request, cycle):
+    # #9's constraint asks that this be built through the visibility-scoped
+    # manager #10 is meant to add to Card, rather than a direct queryset —
+    # but #10 is still open as of this implementation and no such manager
+    # exists yet. This is scoped the same way that manager would need to be
+    # for "your own cards" (this cycle, and only cards you own), so it is
+    # not a privacy gap; it should be swapped for #10's manager once that
+    # lands, to avoid the two pieces of logic drifting apart. See the
+    # comment left on #9 explaining this.
+    return cycle.cards.filter(
+        Q(author=request.user) | Q(pk__in=_anonymous_card_ids_in_session(request))
+    ).order_by("created_at")
+
+
+def _assert_own_card(request, card):
+    """Raise Http404 unless the current request is allowed to edit/withdraw
+    ``card`` — the attributed author, or (for an anonymous card) a session
+    holding the matching plaintext edit token. Mismatch and "doesn't exist"
+    are both a plain Http404, so neither confirms the other case to the
+    caller (same pattern as facilitator_required and create_card).
+    """
+    if card.author_id is not None:
+        if card.author_id != request.user.id:
+            raise Http404
+        return
+
+    tokens = request.session.get(ANONYMOUS_CARD_EDIT_TOKENS_SESSION_KEY, {})
+    token = tokens.get(str(card.pk))
+    if not token or hash_edit_token(token) != card.edit_token_hash:
+        raise Http404
+
+
+def _get_own_card_or_404(request, project, card_id):
+    card = get_object_or_404(
+        Card.objects.select_related("cycle"), pk=card_id, cycle__project=project
+    )
+    _assert_own_card(request, card)
+    return card
 
 
 @login_required
@@ -165,6 +221,11 @@ def create_card(request, pk):
     elif collecting:
         form = CardForm()
 
+    # Only while collecting (#9): once the cycle moves on, cards can no
+    # longer be edited/withdrawn anyway, and pre-reveal visibility only
+    # ever needs to include what you're allowed to act on right now.
+    own_cards = _own_cards_for_cycle(request, cycle) if collecting else None
+
     return render(
         request,
         "projects/card_form.html",
@@ -173,5 +234,73 @@ def create_card(request, pk):
             "cycle": cycle,
             "collecting": collecting,
             "form": form,
+            "own_cards": own_cards,
         },
     )
+
+
+@login_required
+def edit_card(request, pk, card_id):
+    # Same single-query, indistinguishable-404 membership lookup used by
+    # create_card / project_detail.
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    card = _get_own_card_or_404(request, project, card_id)
+
+    if card.cycle.state != FeedbackCycle.State.COLLECTING:
+        # Rejected for every card in the cycle once it's left "collecting",
+        # even the owner's — #9's own rule, which #12's reveal depends on.
+        # This is a normal, expected rejection (the owner already knows
+        # their own card and the cycle's state), not a privacy leak, so it
+        # gets a message + redirect rather than a 404.
+        messages.error(request, "This cycle is no longer collecting submissions.")
+        return redirect("create_card", pk=project.pk)
+
+    if request.method == "POST":
+        form = CardEditForm(request.POST)
+        if form.is_valid():
+            # Only category/text are touched — author and edit_token_hash
+            # are never assigned here, so attribution cannot change as a
+            # side effect of this view (see CardEditForm too).
+            card.category = form.cleaned_data["category"]
+            card.text = form.cleaned_data["text"]
+            card.save(update_fields=["category", "text"])
+            messages.success(request, "Card updated.")
+            return redirect("create_card", pk=project.pk)
+    else:
+        form = CardEditForm(initial={"category": card.category, "text": card.text})
+
+    return render(
+        request,
+        "projects/card_edit.html",
+        {"project": project, "cycle": card.cycle, "card": card, "form": form},
+    )
+
+
+@login_required
+@require_POST
+def withdraw_card(request, pk, card_id):
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    card = _get_own_card_or_404(request, project, card_id)
+
+    if card.cycle.state != FeedbackCycle.State.COLLECTING:
+        messages.error(request, "This cycle is no longer collecting submissions.")
+        return redirect("create_card", pk=project.pk)
+
+    was_anonymous = card.author_id is None
+    card.delete()
+
+    if was_anonymous:
+        # Drop the now-dangling token entry so a stale token for a deleted
+        # card doesn't linger in the session.
+        tokens = dict(request.session.get(ANONYMOUS_CARD_EDIT_TOKENS_SESSION_KEY, {}))
+        if tokens.pop(str(card_id), None) is not None:
+            request.session[ANONYMOUS_CARD_EDIT_TOKENS_SESSION_KEY] = tokens
+
+    messages.success(request, "Card withdrawn.")
+    return redirect("create_card", pk=project.pk)

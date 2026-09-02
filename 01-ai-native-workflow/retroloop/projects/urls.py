@@ -7,5 +7,11 @@ urlpatterns = [
     path("<int:pk>/", views.project_detail, name="project_detail"),
     path("<int:pk>/cycles/new/", views.create_cycle, name="create_cycle"),
     path("<int:pk>/cards/new/", views.create_card, name="create_card"),
+    path("<int:pk>/cards/<int:card_id>/edit/", views.edit_card, name="edit_card"),
+    path(
+        "<int:pk>/cards/<int:card_id>/withdraw/",
+        views.withdraw_card,
+        name="withdraw_card",
+    ),
     path("join/", views.join_project, name="join_project"),
 ]
