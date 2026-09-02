@@ -2,9 +2,10 @@ import re
 from unittest.mock import patch
 
 import pytest
+from django.db import IntegrityError, transaction
 from django.urls import reverse
 
-from projects.models import JOIN_CODE_ALPHABET, Membership, Project
+from projects.models import JOIN_CODE_ALPHABET, FeedbackCycle, Membership, Project
 
 JOIN_CODE_RE = re.compile(rf"^[{JOIN_CODE_ALPHABET}]{{8}}$")
 
@@ -398,3 +399,243 @@ class TestProjectDetail:
 
         assert response.status_code == 302
         assert response.url.startswith(reverse("login"))
+
+    def test_facilitator_sees_start_cycle_action_when_none_active(
+        self, client, django_user_model
+    ):
+        facilitator = django_user_model.objects.create_user(
+            username="tara", password="correct horse battery staple"
+        )
+        project = Project.objects.create(name="No Cycle Yet", created_by=facilitator)
+        Membership.objects.create(
+            project=project, user=facilitator, role=Membership.Role.FACILITATOR
+        )
+        client.force_login(facilitator)
+
+        response = client.get(reverse("project_detail", kwargs={"pk": project.pk}))
+
+        content = response.content.decode()
+        assert reverse("create_cycle", kwargs={"pk": project.pk}) in content
+        assert "start a new cycle" in content.lower()
+
+    def test_member_sees_neutral_message_and_no_action_when_none_active(
+        self, client, django_user_model
+    ):
+        facilitator = django_user_model.objects.create_user(
+            username="uma", password="correct horse battery staple"
+        )
+        project = Project.objects.create(name="No Cycle For Member", created_by=facilitator)
+        Membership.objects.create(
+            project=project, user=facilitator, role=Membership.Role.FACILITATOR
+        )
+        member = django_user_model.objects.create_user(
+            username="victor", password="correct horse battery staple"
+        )
+        Membership.objects.create(project=project, user=member, role=Membership.Role.MEMBER)
+        client.force_login(member)
+
+        response = client.get(reverse("project_detail", kwargs={"pk": project.pk}))
+
+        content = response.content.decode()
+        assert reverse("create_cycle", kwargs={"pk": project.pk}) not in content
+        assert "no active cycle yet" in content.lower()
+
+    def test_any_member_sees_cycle_label_and_state_when_one_is_active(
+        self, client, django_user_model
+    ):
+        facilitator = django_user_model.objects.create_user(
+            username="wendy", password="correct horse battery staple"
+        )
+        project = Project.objects.create(name="Has Cycle", created_by=facilitator)
+        Membership.objects.create(
+            project=project, user=facilitator, role=Membership.Role.FACILITATOR
+        )
+        member = django_user_model.objects.create_user(
+            username="xavier", password="correct horse battery staple"
+        )
+        Membership.objects.create(project=project, user=member, role=Membership.Role.MEMBER)
+        FeedbackCycle.objects.create(
+            project=project, week="Cycle 1", state=FeedbackCycle.State.COLLECTING
+        )
+        create_url = reverse("create_cycle", kwargs={"pk": project.pk})
+
+        for logged_in_as in (facilitator, member):
+            client.force_login(logged_in_as)
+            response = client.get(reverse("project_detail", kwargs={"pk": project.pk}))
+            content = response.content.decode()
+            assert "Cycle 1" in content
+            assert "collecting" in content.lower()
+            assert create_url not in content
+
+
+@pytest.mark.django_db
+class TestCreateCycle:
+    def _make_facilitator_and_project(self, django_user_model, username="fac"):
+        facilitator = django_user_model.objects.create_user(
+            username=username, password="correct horse battery staple"
+        )
+        project = Project.objects.create(name="Cycle Project", created_by=facilitator)
+        Membership.objects.create(
+            project=project, user=facilitator, role=Membership.Role.FACILITATOR
+        )
+        return facilitator, project
+
+    def test_creating_a_cycle_when_none_active_succeeds_in_collecting_state(
+        self, client, django_user_model
+    ):
+        facilitator, project = self._make_facilitator_and_project(django_user_model)
+        client.force_login(facilitator)
+
+        response = client.post(reverse("create_cycle", kwargs={"pk": project.pk}))
+
+        assert response.status_code == 302
+        assert response.url == reverse("project_detail", kwargs={"pk": project.pk})
+        cycle = FeedbackCycle.objects.get(project=project)
+        assert cycle.state == FeedbackCycle.State.COLLECTING
+        assert cycle.week == "Cycle 1"
+        assert cycle.opens_at is not None
+        assert cycle.closes_at is None
+        assert cycle.revealed_at is None
+        assert cycle.voting_closed_at is None
+        assert cycle.completed_at is None
+
+    def test_creating_a_cycle_while_one_is_active_is_rejected(
+        self, client, django_user_model
+    ):
+        facilitator, project = self._make_facilitator_and_project(django_user_model)
+        FeedbackCycle.objects.create(
+            project=project, week="Cycle 1", state=FeedbackCycle.State.COLLECTING
+        )
+        client.force_login(facilitator)
+
+        response = client.post(
+            reverse("create_cycle", kwargs={"pk": project.pk}), follow=True
+        )
+
+        assert FeedbackCycle.objects.filter(project=project).count() == 1
+        content = response.content.decode().lower()
+        assert "already" in content and "active" in content
+
+    def test_creating_a_cycle_is_rejected_for_every_non_closed_state(
+        self, client, django_user_model
+    ):
+        non_closed_states = [
+            state
+            for state in FeedbackCycle.State
+            if state != FeedbackCycle.State.CLOSED
+        ]
+        for state in non_closed_states:
+            facilitator, project = self._make_facilitator_and_project(
+                django_user_model, username=f"fac_{state}"
+            )
+            FeedbackCycle.objects.create(project=project, week="Cycle 1", state=state)
+            client.force_login(facilitator)
+
+            client.post(reverse("create_cycle", kwargs={"pk": project.pk}))
+
+            assert FeedbackCycle.objects.filter(project=project).count() == 1
+
+    def test_creating_a_cycle_is_allowed_after_the_previous_one_is_closed(
+        self, client, django_user_model
+    ):
+        facilitator, project = self._make_facilitator_and_project(django_user_model)
+        FeedbackCycle.objects.create(
+            project=project, week="Cycle 1", state=FeedbackCycle.State.CLOSED
+        )
+        client.force_login(facilitator)
+
+        response = client.post(reverse("create_cycle", kwargs={"pk": project.pk}))
+
+        assert response.status_code == 302
+        assert FeedbackCycle.objects.filter(project=project).count() == 2
+        newest = FeedbackCycle.objects.filter(project=project).exclude(
+            state=FeedbackCycle.State.CLOSED
+        ).get()
+        assert newest.week == "Cycle 2"
+
+    def test_db_constraint_prevents_two_active_cycles_regardless_of_app_logic(
+        self, django_user_model
+    ):
+        # Exercises the constraint directly at the ORM/DB layer, bypassing
+        # the view's own logic entirely, to prove the "no second active
+        # cycle" rule is enforced by the database (a race between two
+        # check-then-create requests can't slip past it) and not only by
+        # an application-level check before insert.
+        facilitator = django_user_model.objects.create_user(
+            username="race_fac", password="correct horse battery staple"
+        )
+        project = Project.objects.create(name="Race Project", created_by=facilitator)
+        FeedbackCycle.objects.create(
+            project=project, week="Cycle 1", state=FeedbackCycle.State.COLLECTING
+        )
+
+        with pytest.raises(IntegrityError):
+            with transaction.atomic():
+                FeedbackCycle.objects.create(
+                    project=project, week="Cycle 2", state=FeedbackCycle.State.COLLECTING
+                )
+
+        assert FeedbackCycle.objects.filter(project=project).count() == 1
+
+    def test_non_facilitator_gets_404(self, client, django_user_model):
+        facilitator, project = self._make_facilitator_and_project(django_user_model)
+        member = django_user_model.objects.create_user(
+            username="yolanda", password="correct horse battery staple"
+        )
+        Membership.objects.create(project=project, user=member, role=Membership.Role.MEMBER)
+        client.force_login(member)
+
+        response = client.post(reverse("create_cycle", kwargs={"pk": project.pk}))
+
+        assert response.status_code == 404
+        assert not FeedbackCycle.objects.filter(project=project).exists()
+
+    def test_non_member_gets_404(self, client, django_user_model):
+        facilitator, project = self._make_facilitator_and_project(django_user_model)
+        outsider = django_user_model.objects.create_user(
+            username="zack", password="correct horse battery staple"
+        )
+        client.force_login(outsider)
+
+        response = client.post(reverse("create_cycle", kwargs={"pk": project.pk}))
+
+        assert response.status_code == 404
+        assert not FeedbackCycle.objects.filter(project=project).exists()
+
+    def test_get_request_does_not_create_a_cycle(self, client, django_user_model):
+        facilitator, project = self._make_facilitator_and_project(django_user_model)
+        client.force_login(facilitator)
+
+        response = client.get(reverse("create_cycle", kwargs={"pk": project.pk}))
+
+        assert response.status_code == 405
+        assert not FeedbackCycle.objects.filter(project=project).exists()
+
+    def test_anonymous_post_redirected_to_login_and_creates_nothing(
+        self, client, django_user_model
+    ):
+        facilitator, project = self._make_facilitator_and_project(django_user_model)
+
+        response = client.post(reverse("create_cycle", kwargs={"pk": project.pk}))
+
+        assert response.status_code == 302
+        assert response.url.startswith(reverse("login"))
+        assert not FeedbackCycle.objects.filter(project=project).exists()
+
+    def test_after_creating_facilitator_lands_on_project_page_showing_collecting_state(
+        self, client, django_user_model
+    ):
+        facilitator, project = self._make_facilitator_and_project(django_user_model)
+        client.force_login(facilitator)
+
+        response = client.post(
+            reverse("create_cycle", kwargs={"pk": project.pk}), follow=True
+        )
+
+        assert response.status_code == 200
+        assert response.redirect_chain[-1][0] == reverse(
+            "project_detail", kwargs={"pk": project.pk}
+        )
+        content = response.content.decode().lower()
+        assert "cycle 1" in content
+        assert "collecting" in content

@@ -73,3 +73,49 @@ class Membership(models.Model):
 
     def __str__(self):
         return f"{self.user} in {self.project} ({self.role})"
+
+
+class FeedbackCycle(models.Model):
+    class State(models.TextChoices):
+        COLLECTING = "collecting", "Collecting"
+        REVEALED = "revealed", "Revealed"
+        CLUSTERING = "clustering", "Clustering"
+        VOTING = "voting", "Voting"
+        DISCUSSING = "discussing", "Discussing"
+        CLOSED = "closed", "Closed"
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name="cycles"
+    )
+    # Auto-generated label ("Cycle N"), not entered by the facilitator — see
+    # the create_cycle view.
+    week = models.CharField(max_length=100)
+    state = models.CharField(
+        max_length=20, choices=State.choices, default=State.COLLECTING
+    )
+    # Set at creation time; not entered by the facilitator.
+    opens_at = models.DateTimeField(auto_now_add=True)
+    # Set by later stage transitions (#12 reveal, #17 close voting, #23
+    # publish) — NULL until then.
+    closes_at = models.DateTimeField(null=True, blank=True)
+    revealed_at = models.DateTimeField(null=True, blank=True)
+    voting_closed_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-opens_at"]
+        constraints = [
+            # DB-level guarantee that a project has at most one non-closed
+            # cycle at a time. This is a partial unique index (state !=
+            # closed), so it holds even under a check-then-create race
+            # between two near-simultaneous requests — the loser gets an
+            # IntegrityError instead of a second active row ever existing.
+            models.UniqueConstraint(
+                fields=["project"],
+                condition=~models.Q(state="closed"),
+                name="unique_active_cycle_per_project",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.project} — {self.week} ({self.state})"
