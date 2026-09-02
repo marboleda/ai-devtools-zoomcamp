@@ -1,3 +1,4 @@
+import hashlib
 import secrets
 
 from django.conf import settings
@@ -119,3 +120,70 @@ class FeedbackCycle(models.Model):
 
     def __str__(self):
         return f"{self.project} — {self.week} ({self.state})"
+
+
+class Cluster(models.Model):
+    """Minimal stub per stack.md's data model sketch, added only so
+    ``Card.cluster`` (below) has something to point at. No clustering
+    behaviour, view, or admin registration ships with #8 — that's a later
+    issue's scope; this just avoids leaving ``Card`` without the field its
+    own spec names.
+    """
+
+    class Origin(models.TextChoices):
+        SUGGESTED = "suggested", "Suggested"
+        HUMAN = "human", "Human"
+
+    cycle = models.ForeignKey(
+        FeedbackCycle, on_delete=models.CASCADE, related_name="clusters"
+    )
+    name = models.CharField(max_length=200)
+    origin = models.CharField(max_length=20, choices=Origin.choices)
+    position = models.PositiveIntegerField(default=0)
+
+    def __str__(self):
+        return self.name
+
+
+def generate_edit_token():
+    return secrets.token_urlsafe(32)
+
+
+def hash_edit_token(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+class Card(models.Model):
+    class Category(models.TextChoices):
+        START = "start", "Start"
+        STOP = "stop", "Stop"
+        CONTINUE = "continue", "Continue"
+
+    cycle = models.ForeignKey(FeedbackCycle, on_delete=models.CASCADE, related_name="cards")
+    category = models.CharField(max_length=20, choices=Category.choices)
+    text = models.CharField(max_length=280)
+    # NULL for an anonymous card — per stack.md invariant #1, no reference
+    # back to the submitter is stored anywhere else on this row either.
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cards",
+    )
+    # Populated only for an anonymous card. Holds a hash only — the
+    # plaintext token lives in the submitter's session (see
+    # projects.views.create_card) and nowhere else, per stack.md invariant
+    # #1. NULL for an attributed card.
+    edit_token_hash = models.CharField(max_length=64, null=True, blank=True)
+    cluster = models.ForeignKey(
+        Cluster,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cards",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.get_category_display()} card in {self.cycle}"

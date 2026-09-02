@@ -1,0 +1,14 @@
+<h1>Add a card — {{ project.name }}</h1>
+<p>{{ cycle.week }} — {{ cycle.get_state_display }}</p>
+
+{% if collecting %}
+<form method="post">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <button type="submit">Add card</button>
+</form>
+{% else %}
+<p>This cycle is no longer collecting submissions.</p>
+{% endif %}
+
+<p><a href="{% url 'project_detail' project.pk %}">Back to project</a></p>
