@@ -153,11 +153,50 @@ def hash_edit_token(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+class CardQuerySet(models.QuerySet):
+    def visible_to(self, *, cycle, viewer, anonymous_card_ids=()):
+        """The cards from ``cycle`` that ``viewer`` is allowed to see, per
+        stack.md invariant #3.
+
+        Pre-reveal (``cycle.revealed_at`` is ``None``): only the viewer's
+        own cards — those attributed to ``viewer``, plus any whose ID is in
+        ``anonymous_card_ids``, the caller-supplied collection of anonymous
+        cards this viewer owns in their current session. There is no
+        facilitator exception; role is never consulted here.
+
+        At and after reveal (``cycle.revealed_at`` is set — covers
+        revealed/clustering/voting/discussing/closed): every card in the
+        cycle.
+
+        Deliberately takes no ``request``/session — the caller (a view) is
+        responsible for turning session data into the explicit
+        ``anonymous_card_ids`` collection, so this stays unit-testable
+        without an HTTP request.
+
+        Results are always scoped to the single ``cycle`` passed in; a card
+        from a different cycle is never returned even for the same viewer.
+        An empty/omitted ``anonymous_card_ids`` never widens the result —
+        it simply contributes no extra rows, it never falls back to "all
+        anonymous cards".
+        """
+        base = self.filter(cycle=cycle).order_by("created_at")
+        if cycle.revealed_at is not None:
+            return base
+        return base.filter(
+            models.Q(author=viewer) | models.Q(pk__in=list(anonymous_card_ids or ()))
+        )
+
+
+CardManager = models.Manager.from_queryset(CardQuerySet)
+
+
 class Card(models.Model):
     class Category(models.TextChoices):
         START = "start", "Start"
         STOP = "stop", "Stop"
         CONTINUE = "continue", "Continue"
+
+    objects = CardManager()
 
     cycle = models.ForeignKey(FeedbackCycle, on_delete=models.CASCADE, related_name="cards")
     category = models.CharField(max_length=20, choices=Category.choices)

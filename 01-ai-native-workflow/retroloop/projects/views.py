@@ -1,7 +1,6 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db import IntegrityError, transaction
-from django.db.models import Q
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
@@ -33,17 +32,16 @@ def _anonymous_card_ids_in_session(request):
 
 
 def _own_cards_for_cycle(request, cycle):
-    # #9's constraint asks that this be built through the visibility-scoped
-    # manager #10 is meant to add to Card, rather than a direct queryset —
-    # but #10 is still open as of this implementation and no such manager
-    # exists yet. This is scoped the same way that manager would need to be
-    # for "your own cards" (this cycle, and only cards you own), so it is
-    # not a privacy gap; it should be swapped for #10's manager once that
-    # lands, to avoid the two pieces of logic drifting apart. See the
-    # comment left on #9 explaining this.
-    return cycle.cards.filter(
-        Q(author=request.user) | Q(pk__in=_anonymous_card_ids_in_session(request))
-    ).order_by("created_at")
+    # Delegates to Card.objects.visible_to (#10), the single reusable
+    # visibility-scoped manager method: only request/session data is
+    # touched here, and it's turned into the plain viewer/anonymous-ID
+    # arguments that method takes, so the actual scoping logic lives in one
+    # place instead of being re-derived per view.
+    return Card.objects.visible_to(
+        cycle=cycle,
+        viewer=request.user,
+        anonymous_card_ids=_anonymous_card_ids_in_session(request),
+    )
 
 
 def _assert_own_card(request, card):
