@@ -18,7 +18,7 @@ def create_project(request):
                 user=request.user,
                 role=Membership.Role.FACILITATOR,
             )
-            return redirect("project_created", pk=project.pk)
+            return redirect("project_detail", pk=project.pk)
     else:
         form = ProjectForm()
 
@@ -26,9 +26,31 @@ def create_project(request):
 
 
 @login_required
-def project_created(request, pk):
-    project = get_object_or_404(Project, pk=pk)
-    return render(request, "projects/created.html", {"project": project})
+def project_detail(request, pk):
+    # A single query keyed on (project, user) so a nonexistent project and an
+    # existing project the user isn't a member of are indistinguishable: both
+    # 404. This never confirms to a non-member whether a given project ID
+    # even exists.
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    memberships = (
+        Membership.objects.filter(project=project)
+        .select_related("user")
+        .order_by("joined_at")
+    )
+    is_facilitator = membership.role == Membership.Role.FACILITATOR
+
+    return render(
+        request,
+        "projects/detail.html",
+        {
+            "project": project,
+            "memberships": memberships,
+            "is_facilitator": is_facilitator,
+        },
+    )
 
 
 @login_required
@@ -50,7 +72,7 @@ def join_project(request):
                         user=request.user,
                         role=Membership.Role.MEMBER,
                     )
-                    return redirect("project_created", pk=project.pk)
+                    return redirect("project_detail", pk=project.pk)
     else:
         form = JoinProjectForm()
 

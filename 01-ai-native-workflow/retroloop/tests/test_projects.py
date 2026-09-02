@@ -26,7 +26,7 @@ class TestCreateProject:
 
         project = Project.objects.get(name="Team Retro")
         assert response.status_code == 302
-        assert response.url == reverse("project_created", kwargs={"pk": project.pk})
+        assert response.url == reverse("project_detail", kwargs={"pk": project.pk})
         assert project.created_by == user
         assert project.description == "Weekly retro project"
 
@@ -160,7 +160,7 @@ class TestJoinProject:
         )
 
         assert response.status_code == 302
-        assert response.url == reverse("project_created", kwargs={"pk": project.pk})
+        assert response.url == reverse("project_detail", kwargs={"pk": project.pk})
         membership = Membership.objects.get(project=project, user=joiner)
         assert membership.role == Membership.Role.MEMBER
         assert Membership.objects.filter(project=project, user=joiner).count() == 1
@@ -272,17 +272,129 @@ class TestJoinProject:
 
 
 @pytest.mark.django_db
-class TestProjectCreatedConfirmation:
-    def test_shows_project_name_and_join_code(self, client, django_user_model):
-        user = django_user_model.objects.create_user(
+class TestProjectDetail:
+    def test_facilitator_sees_project_name_members_and_join_code(
+        self, client, django_user_model
+    ):
+        facilitator = django_user_model.objects.create_user(
             username="henry", password="correct horse battery staple"
         )
-        client.force_login(user)
-        project = Project.objects.create(name="Confirm Me", created_by=user)
+        project = Project.objects.create(name="Confirm Me", created_by=facilitator)
+        Membership.objects.create(
+            project=project, user=facilitator, role=Membership.Role.FACILITATOR
+        )
+        member = django_user_model.objects.create_user(
+            username="iris", password="correct horse battery staple"
+        )
+        Membership.objects.create(project=project, user=member, role=Membership.Role.MEMBER)
+        client.force_login(facilitator)
 
-        response = client.get(reverse("project_created", kwargs={"pk": project.pk}))
+        response = client.get(reverse("project_detail", kwargs={"pk": project.pk}))
 
         assert response.status_code == 200
         content = response.content.decode()
         assert "Confirm Me" in content
         assert project.join_code in content
+        assert "henry" in content
+        assert "iris" in content
+
+    def test_regular_member_does_not_see_join_code(self, client, django_user_model):
+        facilitator = django_user_model.objects.create_user(
+            username="jane", password="correct horse battery staple"
+        )
+        project = Project.objects.create(name="Members Only", created_by=facilitator)
+        Membership.objects.create(
+            project=project, user=facilitator, role=Membership.Role.FACILITATOR
+        )
+        member = django_user_model.objects.create_user(
+            username="kyle", password="correct horse battery staple"
+        )
+        Membership.objects.create(project=project, user=member, role=Membership.Role.MEMBER)
+        client.force_login(member)
+
+        response = client.get(reverse("project_detail", kwargs={"pk": project.pk}))
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert project.join_code not in content
+
+    def test_members_are_ordered_by_joined_at(self, client, django_user_model):
+        facilitator = django_user_model.objects.create_user(
+            username="liam", password="correct horse battery staple"
+        )
+        project = Project.objects.create(name="Ordered", created_by=facilitator)
+        Membership.objects.create(
+            project=project, user=facilitator, role=Membership.Role.FACILITATOR
+        )
+        second = django_user_model.objects.create_user(
+            username="mona", password="correct horse battery staple"
+        )
+        Membership.objects.create(project=project, user=second, role=Membership.Role.MEMBER)
+        third = django_user_model.objects.create_user(
+            username="nate", password="correct horse battery staple"
+        )
+        Membership.objects.create(project=project, user=third, role=Membership.Role.MEMBER)
+        client.force_login(facilitator)
+
+        response = client.get(reverse("project_detail", kwargs={"pk": project.pk}))
+
+        content = response.content.decode()
+        assert content.index("liam") < content.index("mona") < content.index("nate")
+
+    def test_placeholder_sections_are_present(self, client, django_user_model):
+        facilitator = django_user_model.objects.create_user(
+            username="oscar", password="correct horse battery staple"
+        )
+        project = Project.objects.create(name="Placeholders", created_by=facilitator)
+        Membership.objects.create(
+            project=project, user=facilitator, role=Membership.Role.FACILITATOR
+        )
+        client.force_login(facilitator)
+
+        response = client.get(reverse("project_detail", kwargs={"pk": project.pk}))
+
+        content = response.content.decode().lower()
+        assert "current cycle" in content
+        assert "open action items" in content
+        assert "previous retrospectives" in content
+
+    def test_non_member_of_existing_project_gets_404(self, client, django_user_model):
+        owner = django_user_model.objects.create_user(
+            username="petra", password="correct horse battery staple"
+        )
+        project = Project.objects.create(name="Not Yours", created_by=owner)
+        Membership.objects.create(
+            project=project, user=owner, role=Membership.Role.FACILITATOR
+        )
+        outsider = django_user_model.objects.create_user(
+            username="quinlan", password="correct horse battery staple"
+        )
+        client.force_login(outsider)
+
+        response = client.get(reverse("project_detail", kwargs={"pk": project.pk}))
+
+        assert response.status_code == 404
+
+    def test_nonexistent_project_id_gets_404(self, client, django_user_model):
+        user = django_user_model.objects.create_user(
+            username="ruth", password="correct horse battery staple"
+        )
+        client.force_login(user)
+
+        response = client.get(reverse("project_detail", kwargs={"pk": 999999}))
+
+        assert response.status_code == 404
+
+    def test_anonymous_user_redirected_to_login(self, client, django_user_model):
+        owner = django_user_model.objects.create_user(
+            username="sam", password="correct horse battery staple"
+        )
+        project = Project.objects.create(name="Anon View Attempt", created_by=owner)
+        Membership.objects.create(
+            project=project, user=owner, role=Membership.Role.FACILITATOR
+        )
+
+        response = client.get(reverse("project_detail", kwargs={"pk": project.pk}))
+
+        assert response.status_code == 302
+        assert response.url.startswith(reverse("login"))

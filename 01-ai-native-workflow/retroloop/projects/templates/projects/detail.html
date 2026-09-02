@@ -1,0 +1,30 @@
+<h1>{{ project.name }}</h1>
+{% if project.description %}
+<p>{{ project.description }}</p>
+{% endif %}
+
+{% if is_facilitator %}
+<p>Join code: {{ project.join_code }}</p>
+{% endif %}
+
+<h2>Members</h2>
+<ul>
+  {% for membership in memberships %}
+  <li>{{ membership.user.username }} — {{ membership.get_role_display }}</li>
+  {% endfor %}
+</ul>
+
+<section>
+  <h2>Current cycle</h2>
+  <p><em>Placeholder — no feedback cycle functionality yet.</em></p>
+</section>
+
+<section>
+  <h2>Open action items</h2>
+  <p><em>Placeholder — no action item functionality yet.</em></p>
+</section>
+
+<section>
+  <h2>Previous retrospectives</h2>
+  <p><em>Placeholder — no retrospective history yet.</em></p>
+</section>
