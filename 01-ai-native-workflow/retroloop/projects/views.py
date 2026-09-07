@@ -24,6 +24,7 @@ from .forms import (
     ManualDecisionForm,
     MeetingUploadForm,
     ProjectForm,
+    PublishSummaryForm,
     DecisionDraftEditForm,
 )
 from .models import (
@@ -39,6 +40,7 @@ from .models import (
     MeetingRecord,
     Membership,
     Project,
+    RetrospectiveSummary,
     Vote,
     generate_edit_token,
     hash_edit_token,
@@ -149,6 +151,15 @@ def project_detail(request, pk):
     participation_count = (
         active_cycle.participations.count() if active_cycle is not None else None
     )
+    # #23: past cycles whose summary has been published — a closed cycle
+    # with no published summary (not reachable through this app's own UI,
+    # since closing only ever happens via publish_summary) is excluded too,
+    # so this never links to a cycle_summary page that would 404.
+    published_cycles = list(
+        project.cycles.filter(
+            state=FeedbackCycle.State.CLOSED, summary__isnull=False
+        ).order_by("-opens_at")
+    )
 
     return render(
         request,
@@ -160,6 +171,7 @@ def project_detail(request, pk):
             "active_cycle": active_cycle,
             "member_count": member_count,
             "participation_count": participation_count,
+            "published_cycles": published_cycles,
         },
     )
 
@@ -1420,3 +1432,164 @@ def create_action_item(request, pk, project, membership):
     else:
         messages.error(request, "Couldn't add that action item — check the description.")
     return redirect("review_drafts", pk=project.pk)
+
+
+# -- #23: publishing the retrospective summary --
+#
+# Unlike the other stage screens (board_reveal, review_drafts, ...), this
+# view is addressed by a specific cycle id rather than "the project's
+# active cycle" — publishing is exactly what moves a cycle to state=closed
+# (see publish_summary below), so a lookup keyed on "not closed" would stop
+# finding it the instant it's published. That also means a past, already
+# published cycle's summary stays reachable — project_detail's "Previous
+# retrospectives" section links to exactly these (closed cycles with a
+# published summary), and the active cycle's own facilitator-only section
+# links here too, for the not-yet-published preview.
+#
+# Per plan.md's role table, a plain member can "view completed retrospective
+# summaries" — so unlike review_drafts/meeting_upload, this screen is not
+# behind @facilitator_required. Before a summary has been published, only
+# the facilitator can reach it at all (to preview the data and publish);
+# a member gets a 404, the same "not there yet" treatment other pre-stage
+# views use.
+
+
+def _cycle_summary_context(project, cycle, viewer, *, is_facilitator, summary):
+    # "Top discussion topics (by #17's rank)" and "key notes (from #18)":
+    # DiscussionTopic.objects.for_cycle already orders by rank (its Meta's
+    # default ordering) and carries its own notes field — nothing extra to
+    # compute here.
+    topics = list(
+        DiscussionTopic.objects.for_cycle(cycle=cycle).select_related("cluster")
+    )
+    # "Confirmed decisions and confirmed action items only": the *only*
+    # query path per #22's own docstring — never unconfirmed_for_cycle,
+    # never the bare manager.
+    decisions = list(
+        DecisionDraft.objects.confirmed_for_cycle(cycle=cycle).order_by("pk")
+    )
+    action_items = list(
+        ActionItem.objects.confirmed_for_cycle(cycle=cycle)
+        .select_related("owner")
+        .order_by("pk")
+    )
+    # "Attendance/participation": CycleParticipation is the only signal
+    # available (#11) — who submitted feedback, not who "attended" in any
+    # richer sense (stack.md has no separate meeting-attendance record).
+    participations = list(
+        cycle.participations.select_related("member").order_by("submitted_at")
+    )
+    member_count = project.memberships.count()
+    # "The original feedback cards", anonymity preserved: Card.objects.
+    # visible_to (#10) returns every card for any viewer once the cycle is
+    # revealed, and an anonymous card's .author stays None straight from
+    # the query — the template renders it exactly like board_reveal's
+    # fragment does, no author shown.
+    cards = list(Card.objects.visible_to(cycle=cycle, viewer=viewer))
+    category_groups = [
+        (value, label, [card for card in cards if card.category == value])
+        for value, label in Card.Category.choices
+    ]
+    return {
+        "project": project,
+        "cycle": cycle,
+        "is_facilitator": is_facilitator,
+        "summary": summary,
+        "published": summary is not None,
+        "topics": topics,
+        "decisions": decisions,
+        "action_items": action_items,
+        "participations": participations,
+        "participation_count": len(participations),
+        "member_count": member_count,
+        "category_groups": category_groups,
+    }
+
+
+@login_required
+def cycle_summary(request, pk, cycle_id):
+    # Same single-query, indistinguishable-404 membership lookup used
+    # throughout: a non-member and a nonexistent project are both a plain
+    # 404.
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    cycle = get_object_or_404(FeedbackCycle, pk=cycle_id, project=project)
+    is_facilitator = membership.role == Membership.Role.FACILITATOR
+
+    if cycle.revealed_at is None:
+        # Nothing to summarize before reveal — not reachable through this
+        # app's own UI at this stage, same treatment
+        # _get_active_revealed_cycle_or_404 gives elsewhere.
+        raise Http404
+
+    summary = RetrospectiveSummary.objects.filter(cycle=cycle).first()
+    if summary is None and not is_facilitator:
+        # Per plan.md, a member can view *completed* retrospective
+        # summaries — nothing has been published for this cycle yet, so
+        # there is nothing here for a non-facilitator to see.
+        raise Http404
+
+    context = _cycle_summary_context(
+        project, cycle, request.user, is_facilitator=is_facilitator, summary=summary
+    )
+
+    if summary is None:
+        # Facilitator-only preview, with a publish form pre-filled from
+        # #21's extraction summary when there is one — the facilitator can
+        # still edit or clear it before publishing.
+        default_body = ""
+        latest_record = (
+            cycle.meeting_records.filter(
+                processing_state=MeetingRecord.ProcessingState.COMPLETED
+            )
+            .exclude(extracted_summary="")
+            .first()
+        )
+        if latest_record is not None:
+            default_body = latest_record.extracted_summary
+        context["publish_form"] = PublishSummaryForm(initial={"body": default_body})
+
+    return render(request, "projects/cycle_summary.html", context)
+
+
+@facilitator_required
+@require_POST
+def publish_summary(request, pk, cycle_id, project, membership):
+    """One-shot facilitator action (per #6): creates the cycle's
+    ``RetrospectiveSummary`` row and, in the same request, sets
+    ``FeedbackCycle.completed_at`` and moves ``state`` to ``closed`` — the
+    cycle's terminal state. ``state`` (not ``completed_at``) is what #7's
+    ``unique_active_cycle_per_project`` constraint is keyed on
+    (``state != closed``), so this is what actually lets ``create_cycle``
+    succeed again for the same project afterwards.
+
+    Rejected without creating a second row if a summary already exists for
+    this cycle — checked up front for a friendly message, and backstopped
+    by ``cycle``'s OneToOneField uniqueness (an IntegrityError from a
+    genuine check-then-create race is caught the same way create_cycle
+    catches one on its own unique constraint).
+    """
+    cycle = get_object_or_404(FeedbackCycle, pk=cycle_id, project=project)
+
+    if RetrospectiveSummary.objects.filter(cycle=cycle).exists():
+        messages.error(request, "This cycle's summary has already been published.")
+        return redirect("cycle_summary", pk=project.pk, cycle_id=cycle.pk)
+
+    form = PublishSummaryForm(request.POST)
+    body = form.cleaned_data["body"] if form.is_valid() else ""
+
+    try:
+        with transaction.atomic():
+            RetrospectiveSummary.objects.create(cycle=cycle, body=body)
+    except IntegrityError:
+        messages.error(request, "This cycle's summary has already been published.")
+        return redirect("cycle_summary", pk=project.pk, cycle_id=cycle.pk)
+
+    cycle.completed_at = timezone.now()
+    cycle.state = FeedbackCycle.State.CLOSED
+    cycle.save(update_fields=["completed_at", "state"])
+
+    messages.success(request, "Retrospective summary published.")
+    return redirect("cycle_summary", pk=project.pk, cycle_id=cycle.pk)

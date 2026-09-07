@@ -40,6 +40,7 @@
   {% if is_facilitator %}
   <p><a href="{% url 'meeting_upload' project.pk %}">Upload meeting recording or transcript</a></p>
   <p><a href="{% url 'review_drafts' project.pk %}">Review decisions and action items</a></p>
+  <p><a href="{% url 'cycle_summary' project.pk active_cycle.pk %}">View / publish retrospective summary</a></p>
   {% endif %}
   {% endif %}
   {% elif is_facilitator %}
@@ -59,5 +60,13 @@
 
 <section>
   <h2>Previous retrospectives</h2>
-  <p><em>Placeholder — no retrospective history yet.</em></p>
+  {% if published_cycles %}
+  <ul>
+    {% for cycle in published_cycles %}
+    <li><a href="{% url 'cycle_summary' project.pk cycle.pk %}">{{ cycle.week }}</a></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p><em>No published retrospectives yet.</em></p>
+  {% endif %}
 </section>

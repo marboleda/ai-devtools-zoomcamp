@@ -1,0 +1,121 @@
+<h1>Retrospective summary — {{ project.name }}</h1>
+<p>{{ cycle.week }}</p>
+
+{% if messages %}
+<ul>
+  {% for message in messages %}
+  <li>{{ message }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if published %}
+<p><em>Published {{ summary.published_at }}</em></p>
+{% if summary.body %}
+<section>
+  <h2>Summary notes</h2>
+  <p>{{ summary.body|linebreaks }}</p>
+</section>
+{% endif %}
+{% elif is_facilitator %}
+<p><em>Not yet published — this preview is only visible to the facilitator.</em></p>
+<section>
+  <h2>Publish this summary</h2>
+  <form method="post" action="{% url 'publish_summary' project.pk cycle.pk %}">
+    {% csrf_token %}
+    {{ publish_form.body.label_tag }}
+    {{ publish_form.body }}
+    {{ publish_form.body.errors }}
+    <button type="submit">Publish summary</button>
+  </form>
+</section>
+{% endif %}
+
+<section>
+  <h2>Top discussion topics</h2>
+  {% for topic in topics %}
+  <div class="discussion-topic">
+    <h3>#{{ topic.rank }} — {{ topic.cluster.name }}</h3>
+    {% if topic.outcome %}
+    <p>Outcome: {{ topic.get_outcome_display }}</p>
+    {% else %}
+    <p>Outcome: not discussed</p>
+    {% endif %}
+    {% if topic.notes %}
+    <pre class="topic-notes">{{ topic.notes }}</pre>
+    {% endif %}
+  </div>
+  {% empty %}
+  <p>No discussion topics for this cycle.</p>
+  {% endfor %}
+</section>
+
+<section>
+  <h2>Confirmed decisions</h2>
+  {% if decisions %}
+  <ul>
+    {% for decision in decisions %}
+    <li>{{ decision.text }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No confirmed decisions.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Confirmed action items</h2>
+  {% if action_items %}
+  <ul>
+    {% for item in action_items %}
+    <li>
+      {{ item.description }}
+      {% if item.owner %} — {{ item.owner.username }}{% endif %}
+      {% if item.due_date %} (due {{ item.due_date }}){% endif %}
+      — {{ item.get_status_display }}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No confirmed action items.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Attendance / participation</h2>
+  <p>{{ participation_count }} of {{ member_count }} submitted feedback</p>
+  {% if participations %}
+  <ul>
+    {% for participation in participations %}
+    <li>{{ participation.member.username }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Original feedback cards</h2>
+  {% for value, label, cards in category_groups %}
+  <div>
+    <h3>{{ label }}</h3>
+    {% if cards %}
+    <ul>
+      {% for card in cards %}
+      <li>
+        {{ card.text }}
+        {% if card.author %}
+        — {{ card.author.username }}
+        {% else %}
+        — Anonymous
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p>No cards in this category.</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+
+<p><a href="{% url 'project_detail' project.pk %}">Back to project</a></p>

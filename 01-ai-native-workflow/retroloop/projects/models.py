@@ -728,3 +728,46 @@ class ActionItem(models.Model):
 
     def __str__(self):
         return self.description[:60]
+
+
+# -- #23: publishing the retrospective summary --
+#
+# RetrospectiveSummary (cycle, body, published_at) per stack.md — the
+# terminal artifact of a retrospective. ``cycle`` is a OneToOneField, not a
+# plain ForeignKey: "a summary can be published only once per cycle" (#23's
+# own acceptance criteria) is enforced at the database level this way, the
+# same reasoning DiscussionTopic.cluster (#17) uses to make closing voting
+# itself one-shot. projects.views.publish_summary is the facilitator-only
+# action (per #6) that creates this row; it also sets
+# FeedbackCycle.completed_at and flips ``state`` to ``closed`` in the same
+# request — that state change, not completed_at itself, is what satisfies
+# #7's unique_active_cycle_per_project constraint (keyed on
+# ``state != closed``) and lets ``create_cycle`` succeed again for the same
+# project.
+#
+# ``body`` is a short, optional free-text note the facilitator can add on
+# the publish form — a reasonable default is #21's own
+# MeetingRecord.extracted_summary, pre-filled by the view but always
+# editable before publishing. Everything else #23's acceptance criteria
+# names (top discussion topics, key notes, confirmed decisions/action
+# items, attendance, the original feedback cards) is assembled at render
+# time from the existing live query paths
+# (DiscussionTopic.objects.for_cycle, DecisionDraft/ActionItem.objects.
+# confirmed_for_cycle, cycle.participations, Card.objects.visible_to)
+# rather than duplicated into this field — those are all already the one
+# reusable path each has, per their own docstrings, so the summary screen
+# reads from them directly instead of re-deriving or re-storing the same
+# data. ``published_at`` is set at creation time (``auto_now_add``) since
+# creating this row *is* the act of publishing — there is no draft state
+# for a summary the way #21/#22's drafts have one.
+
+
+class RetrospectiveSummary(models.Model):
+    cycle = models.OneToOneField(
+        FeedbackCycle, on_delete=models.CASCADE, related_name="summary"
+    )
+    body = models.TextField(blank=True)
+    published_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Summary for {self.cycle}"

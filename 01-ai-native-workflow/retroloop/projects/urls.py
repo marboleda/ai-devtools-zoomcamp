@@ -93,5 +93,15 @@ urlpatterns = [
         views.discard_action_item,
         name="discard_action_item",
     ),
+    path(
+        "<int:pk>/cycles/<int:cycle_id>/summary/",
+        views.cycle_summary,
+        name="cycle_summary",
+    ),
+    path(
+        "<int:pk>/cycles/<int:cycle_id>/summary/publish/",
+        views.publish_summary,
+        name="publish_summary",
+    ),
     path("join/", views.join_project, name="join_project"),
 ]

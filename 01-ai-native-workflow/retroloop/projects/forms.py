@@ -1,7 +1,15 @@
 from django import forms
 from django.contrib.auth import get_user_model
 
-from .models import ActionItem, Card, Cluster, DecisionDraft, MeetingRecord, Project
+from .models import (
+    ActionItem,
+    Card,
+    Cluster,
+    DecisionDraft,
+    MeetingRecord,
+    Project,
+    RetrospectiveSummary,
+)
 
 User = get_user_model()
 
@@ -222,3 +230,28 @@ class ManualActionItemForm(forms.ModelForm):
         self.fields["owner"].queryset = _project_member_queryset(project)
         self.fields["owner"].required = False
         self.fields["due_date"].required = False
+
+
+# -- #23: publishing the retrospective summary --
+#
+# The facilitator's one optional free-text field on the publish form —
+# everything else the summary screen shows is assembled from live queries,
+# not from a form field (see the RetrospectiveSummary model docstring).
+
+
+class PublishSummaryForm(forms.ModelForm):
+    """Validates the optional note a facilitator can add when publishing
+    (#23) — RetrospectiveSummary.body. Blank is fine (the model field
+    itself is ``blank=True``); the view pre-fills ``initial`` from #21's
+    MeetingRecord.extracted_summary when one exists, but the facilitator is
+    always free to clear or rewrite it before submitting.
+    """
+
+    class Meta:
+        model = RetrospectiveSummary
+        fields = ["body"]
+        widgets = {"body": forms.Textarea(attrs={"rows": 4})}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["body"].required = False
