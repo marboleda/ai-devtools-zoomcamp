@@ -53,3 +53,15 @@ class ClusterNameForm(forms.ModelForm):
     class Meta:
         model = Cluster
         fields = ["name"]
+
+
+class DiscussionNoteForm(forms.Form):
+    """Validates one free-text note (#18) before it gets appended to
+    ``DiscussionTopic.notes`` — non-blank (CharField strips whitespace
+    before validating, same as CardForm), capped at a generous length
+    since notes accumulate as a running log inside a single TextField
+    rather than one row per note (there's no separate Note model — see
+    the models.py docstring / #18's own scope note about this).
+    """
+
+    text = forms.CharField(max_length=2000, widget=forms.Textarea(attrs={"rows": 2}))

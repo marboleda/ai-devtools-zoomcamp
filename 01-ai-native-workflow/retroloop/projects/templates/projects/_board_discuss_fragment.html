@@ -1,0 +1,40 @@
+{% if not cycle %}
+<p>No active feedback cycle yet.</p>
+{% elif not revealed %}
+<p>Cards haven't been revealed yet.</p>
+{% elif not voting_closed %}
+<p>Voting hasn't closed yet.</p>
+{% else %}
+{% for topic in topics %}
+<section class="discussion-topic" data-topic-id="{{ topic.pk }}">
+  <h2>#{{ topic.rank }} — {{ topic.cluster.name }}</h2>
+
+  {% if topic.outcome %}
+  <p>Outcome: {{ topic.get_outcome_display }}</p>
+  {% elif current_topic and current_topic.pk == topic.pk %}
+  <p><strong>Currently under discussion.</strong></p>
+  {% if is_facilitator %}
+  <form method="post" action="{% url 'set_topic_outcome' project.pk topic.pk %}">
+    {% csrf_token %}
+    <button type="submit" name="outcome" value="discussed">Mark discussed</button>
+    <button type="submit" name="outcome" value="skipped">Mark skipped</button>
+    <button type="submit" name="outcome" value="deferred">Mark deferred</button>
+  </form>
+  {% endif %}
+  <form method="post" action="{% url 'add_discussion_note' project.pk %}">
+    {% csrf_token %}
+    <textarea name="text" placeholder="Add a note" rows="2" required></textarea>
+    <button type="submit">Add note</button>
+  </form>
+  {% else %}
+  <p>Not yet discussed.</p>
+  {% endif %}
+
+  {% if topic.notes %}
+  <pre class="topic-notes">{{ topic.notes }}</pre>
+  {% endif %}
+</section>
+{% empty %}
+<p>No discussion topics for this cycle.</p>
+{% endfor %}
+{% endif %}

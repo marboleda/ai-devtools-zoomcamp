@@ -5,7 +5,7 @@
 <p>{{ cycle.week }} — {{ cycle.get_state_display }}</p>
 {% endif %}
 
-<p><a href="{% url 'board_cluster' project.pk %}">Cluster mode</a> | <a href="{% url 'board_vote' project.pk %}">Vote mode</a></p>
+<p><a href="{% url 'board_cluster' project.pk %}">Cluster mode</a> | <a href="{% url 'board_vote' project.pk %}">Vote mode</a> | <a href="{% url 'board_discuss' project.pk %}">Discuss mode</a></p>
 
 <!--
   Shared polling mechanism (stack.md's "~3s", htmx only — no websockets, no

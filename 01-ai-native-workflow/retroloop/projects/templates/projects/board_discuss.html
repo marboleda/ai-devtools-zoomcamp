@@ -1,0 +1,21 @@
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+
+<h1>Discuss — {{ project.name }}</h1>
+{% if cycle %}
+<p>{{ cycle.week }} — {{ cycle.get_state_display }}</p>
+{% endif %}
+
+<p><a href="{% url 'board_reveal' project.pk %}">Reveal mode</a> | <a href="{% url 'board_cluster' project.pk %}">Cluster mode</a> | <a href="{% url 'board_vote' project.pk %}">Vote mode</a></p>
+
+{% comment %}
+Same shared polling mechanism board_reveal (#13), board_cluster (#15), and
+board_vote (#16/#17) use: this div re-fetches this same URL every 3 seconds
+and swaps in the refreshed fragment, so an outcome the facilitator sets or a
+note any member adds becomes visible on every other member's board within
+one poll interval.
+{% endcomment %}
+<div id="board-discuss" hx-get="{% url 'board_discuss' project.pk %}" hx-trigger="every 3s" hx-swap="innerHTML">
+  {% include "projects/_board_discuss_fragment.html" %}
+</div>
+
+<p><a href="{% url 'project_detail' project.pk %}">Back to project</a></p>

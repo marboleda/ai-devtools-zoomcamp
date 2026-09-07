@@ -386,6 +386,38 @@ class Vote(models.Model):
 # which Vote.objects.totals_for_cycle (#16) stops raising VotingStillOpen.
 # It uses that exact method to build the ranking below.
 
+# -- #18: discussion mode --
+#
+# DiscussionTopic carries no direct FK to FeedbackCycle (only to Cluster,
+# which itself points at the cycle), so every cycle-scoped query goes
+# through cluster__cycle. Kept in a manager rather than repeated inline in
+# projects.views, the same way Card.objects.visible_to (#10) and
+# Vote.objects.totals_for_cycle (#16) centralize their own cycle-scoped
+# logic.
+
+
+class DiscussionTopicQuerySet(models.QuerySet):
+    def for_cycle(self, *, cycle):
+        """Every ``DiscussionTopic`` belonging to ``cycle`` — the full
+        discussion agenda, in ``rank`` order (Meta's default ordering,
+        left unchanged here).
+        """
+        return self.filter(cluster__cycle=cycle)
+
+    def current_for_cycle(self, *, cycle):
+        """The topic currently under discussion, per #18's decision:
+        whichever ``DiscussionTopic`` in ``cycle`` has no ``outcome`` set
+        yet and the lowest ``rank`` — the next undecided topic in agenda
+        order. There is no separate "current topic" pointer field on any
+        model (stack.md), so this is computed at query time, freshly, on
+        every call. Returns ``None`` once every topic in the cycle has an
+        outcome (or the cycle has no topics at all).
+        """
+        return self.for_cycle(cycle=cycle).filter(outcome="").order_by("rank").first()
+
+
+DiscussionTopicManager = models.Manager.from_queryset(DiscussionTopicQuerySet)
+
 
 class DiscussionTopic(models.Model):
     """(cluster, rank, outcome, notes) per stack.md — the prioritized
@@ -406,13 +438,15 @@ class DiscussionTopic(models.Model):
 
     ``outcome`` starts blank: nothing has been discussed yet at close-voting
     time. Setting it to discussed/skipped/deferred, and writing ``notes``,
-    is a later issue's (#18) job — out of scope here.
+    is #18's job.
     """
 
     class Outcome(models.TextChoices):
         DISCUSSED = "discussed", "Discussed"
         SKIPPED = "skipped", "Skipped"
         DEFERRED = "deferred", "Deferred"
+
+    objects = DiscussionTopicManager()
 
     cluster = models.OneToOneField(
         Cluster, on_delete=models.CASCADE, related_name="discussion_topic"

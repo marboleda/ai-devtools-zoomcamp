@@ -38,6 +38,17 @@ urlpatterns = [
     path(
         "<int:pk>/cycles/close-voting/", views.close_voting, name="close_voting"
     ),
+    path("<int:pk>/board/discuss/", views.board_discuss, name="board_discuss"),
+    path(
+        "<int:pk>/board/discuss/topics/<int:topic_id>/outcome/",
+        views.set_topic_outcome,
+        name="set_topic_outcome",
+    ),
+    path(
+        "<int:pk>/board/discuss/note/",
+        views.add_discussion_note,
+        name="add_discussion_note",
+    ),
     path("<int:pk>/cards/new/", views.create_card, name="create_card"),
     path("<int:pk>/cards/<int:card_id>/edit/", views.edit_card, name="edit_card"),
     path(

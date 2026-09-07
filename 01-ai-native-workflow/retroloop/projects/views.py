@@ -9,7 +9,14 @@ from django.views.decorators.http import require_POST
 
 from .clustering import suggest_clusters_for_cycle
 from .decorators import facilitator_required
-from .forms import CardEditForm, CardForm, ClusterNameForm, JoinProjectForm, ProjectForm
+from .forms import (
+    CardEditForm,
+    CardForm,
+    ClusterNameForm,
+    DiscussionNoteForm,
+    JoinProjectForm,
+    ProjectForm,
+)
 from .models import (
     MAX_VOTE_WEIGHT_PER_MEMBER,
     Card,
@@ -737,6 +744,169 @@ def close_voting(request, pk, project, membership):
 
     messages.success(request, "Voting closed. Discussion agenda is ready.")
     return redirect("project_detail", pk=project.pk)
+
+
+# -- #18: discussion mode --
+#
+# The board's fourth and last mode, reachable once #17's close_voting has
+# produced the DiscussionTopic agenda. Two different permission levels
+# apply to the same page, per #18's decision: only the facilitator (#6's
+# check) can set a topic's outcome, but *any* member can attach a note to
+# whichever topic is currently under discussion —
+# DiscussionTopic.objects.current_for_cycle (the lowest-ranked topic whose
+# outcome is still blank). No AI call anywhere in this file: a note is
+# stored as the plain text a member typed, nothing more.
+
+
+def _board_discuss_context(project, cycle, *, is_facilitator):
+    topics = list(
+        DiscussionTopic.objects.for_cycle(cycle=cycle).select_related("cluster")
+    )
+    # Recomputed fresh on every render rather than read from a stored
+    # pointer — there is no such field on any model (stack.md), by #18's
+    # own decision. Once every topic has an outcome, this is None and the
+    # template shows no "currently under discussion" section at all.
+    current_topic = DiscussionTopic.objects.current_for_cycle(cycle=cycle)
+    return {
+        "project": project,
+        "cycle": cycle,
+        "revealed": True,
+        "voting_closed": True,
+        "topics": topics,
+        "current_topic": current_topic,
+        "is_facilitator": is_facilitator,
+    }
+
+
+def _render_discuss_fragment(request, project, cycle, *, is_facilitator):
+    context = _board_discuss_context(project, cycle, is_facilitator=is_facilitator)
+    return render(request, "projects/_board_discuss_fragment.html", context)
+
+
+def _get_active_discussable_cycle_or_404(project):
+    """The project's active (non-closed) cycle, required to already have
+    had voting closed (#17) — that's what produces the DiscussionTopic
+    agenda #18's mutation endpoints (set_topic_outcome,
+    add_discussion_note) act on. Builds on
+    _get_active_revealed_cycle_or_404 (#15) the same way cast_vote's own
+    extra ``voting_closed_at`` check does, just inverted: those endpoints
+    are only reachable *before* close, this one only *after*. Mirrors that
+    helper's reasoning too — these mutation endpoints are only ever linked
+    to from an already-rendered, voting-closed discuss board, so there is
+    nothing to redirect back to.
+    """
+    cycle = _get_active_revealed_cycle_or_404(project)
+    if cycle.voting_closed_at is None:
+        raise Http404
+    return cycle
+
+
+@login_required
+def board_discuss(request, pk):
+    # Same single-query, indistinguishable-404 membership lookup as
+    # board_reveal/board_cluster/board_vote: any member can view the board.
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
+    revealed = cycle is not None and cycle.revealed_at is not None
+    voting_closed = cycle is not None and cycle.voting_closed_at is not None
+    is_facilitator = membership.role == Membership.Role.FACILITATOR
+
+    # Discuss mode only makes sense once #17's close_voting has produced the
+    # DiscussionTopic agenda — no topics exist before that. Mirrors
+    # board_vote's own "not ready yet" handling: a friendly in-page message
+    # rather than a 404, since any member is always allowed to *view* the
+    # board, whatever stage the cycle happens to be in.
+    if voting_closed:
+        context = _board_discuss_context(project, cycle, is_facilitator=is_facilitator)
+    else:
+        context = {
+            "project": project,
+            "cycle": cycle,
+            "revealed": revealed,
+            "voting_closed": False,
+            "topics": None,
+            "current_topic": None,
+            "is_facilitator": is_facilitator,
+        }
+
+    # Same htmx poll-fragment convention as the other three board modes: an
+    # HX-Request gets just the refreshed board content, not the surrounding
+    # page chrome.
+    template = (
+        "projects/_board_discuss_fragment.html"
+        if request.headers.get("HX-Request") == "true"
+        else "projects/board_discuss.html"
+    )
+    return render(request, template, context)
+
+
+@facilitator_required
+@require_POST
+def set_topic_outcome(request, pk, topic_id, project, membership):
+    """Facilitator-only (per #6's decorator): set one DiscussionTopic's
+    outcome to discussed/skipped/deferred. Any topic belonging to the
+    project's active cycle can be targeted, not only the one
+    current_for_cycle currently reports — the facilitator is the one
+    running the meeting and may legitimately want to mark a topic skipped
+    or deferred out of strict rank order; #18's acceptance criteria places
+    no such restriction on this action, only on who may perform it.
+    """
+    # Not reachable through this app's own UI before the agenda exists —
+    # the discuss board never links to this action until then.
+    cycle = _get_active_discussable_cycle_or_404(project)
+    topic = get_object_or_404(DiscussionTopic, pk=topic_id, cluster__cycle=cycle)
+
+    outcome = request.POST.get("outcome")
+    valid_outcomes = {value for value, _label in DiscussionTopic.Outcome.choices}
+    if outcome not in valid_outcomes:
+        # A malformed/tampered request — same "not reachable through this
+        # app's own UI" treatment cast_vote gives a bad delta value.
+        raise Http404
+    topic.outcome = outcome
+    topic.save(update_fields=["outcome"])
+
+    return _render_discuss_fragment(request, project, cycle, is_facilitator=True)
+
+
+@login_required
+@require_POST
+def add_discussion_note(request, pk):
+    """Any member (not only the facilitator, per #18's decision and
+    plan.md's "team members can manually record notes") can attach a
+    free-text note to the topic currently under discussion. There is no
+    topic id in this URL at all: the target is always
+    DiscussionTopic.objects.current_for_cycle, computed server-side, so a
+    member can never attach a note to a topic that isn't the current one
+    just by crafting a request.
+
+    Notes accumulate rather than overwrite — DiscussionTopic.notes is a
+    single TextField (stack.md), not a separate one-row-per-note model, so
+    each new note is appended as its own paragraph, prefixed with the
+    author's username, after whatever is already there.
+    """
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    cycle = _get_active_discussable_cycle_or_404(project)
+    topic = DiscussionTopic.objects.current_for_cycle(cycle=cycle)
+    if topic is None:
+        # Every topic already has an outcome (or there are no topics at
+        # all) — nothing is "currently under discussion" to attach a note
+        # to.
+        raise Http404
+
+    form = DiscussionNoteForm(request.POST)
+    if form.is_valid():
+        entry = f"{request.user.username}: {form.cleaned_data['text']}"
+        topic.notes = f"{topic.notes}\n\n{entry}" if topic.notes else entry
+        topic.save(update_fields=["notes"])
+
+    is_facilitator = membership.role == Membership.Role.FACILITATOR
+    return _render_discuss_fragment(request, project, cycle, is_facilitator=is_facilitator)
 
 
 @login_required
