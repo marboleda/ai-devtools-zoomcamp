@@ -122,6 +122,38 @@ class FeedbackCycle(models.Model):
         return f"{self.project} — {self.week} ({self.state})"
 
 
+class CycleParticipation(models.Model):
+    """(cycle, member, submitted_at) — created the first time ``member``
+    saves a card in ``cycle``; a second card from the same member in the
+    same cycle does not create a second row (see the unique constraint
+    below and its use with ``get_or_create`` in projects.views.create_card).
+
+    Deliberately holds no card data — per stack.md invariant #1, this
+    answers "who still needs to submit?" and feeds the participation-rate
+    indicator without ever linking a person to card content.
+    """
+
+    cycle = models.ForeignKey(
+        FeedbackCycle, on_delete=models.CASCADE, related_name="participations"
+    )
+    member = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="cycle_participations",
+    )
+    submitted_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["cycle", "member"], name="unique_cycle_participation"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.member} participated in {self.cycle}"
+
+
 class Cluster(models.Model):
     """Minimal stub per stack.md's data model sketch, added only so
     ``Card.cluster`` (below) has something to point at. No clustering

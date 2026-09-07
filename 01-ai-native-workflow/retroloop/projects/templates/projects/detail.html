@@ -26,6 +26,7 @@
   <h2>Current cycle</h2>
   {% if active_cycle %}
   <p>{{ active_cycle.week }} — {{ active_cycle.get_state_display }}</p>
+  <p>{{ participation_count }} of {{ member_count }} submitted</p>
   {% if active_cycle.state == "collecting" %}
   <p><a href="{% url 'create_card' project.pk %}">Add a card</a></p>
   {% endif %}

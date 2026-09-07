@@ -7,7 +7,15 @@ from django.views.decorators.http import require_POST
 
 from .decorators import facilitator_required
 from .forms import CardEditForm, CardForm, JoinProjectForm, ProjectForm
-from .models import Card, FeedbackCycle, Membership, Project, generate_edit_token, hash_edit_token
+from .models import (
+    Card,
+    CycleParticipation,
+    FeedbackCycle,
+    Membership,
+    Project,
+    generate_edit_token,
+    hash_edit_token,
+)
 
 # Session key for the {card id (str): plaintext edit token} mapping kept for
 # anonymous submissions in this session. Only the hash is ever persisted on
@@ -107,6 +115,13 @@ def project_detail(request, pk):
     )
     is_facilitator = membership.role == Membership.Role.FACILITATOR
     active_cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
+    # "N of M submitted" for #11: M is the project's member count, N is the
+    # count of CycleParticipation rows for the active cycle. Never touches
+    # Card, so card content/count is never exposed by this indicator.
+    member_count = memberships.count()
+    participation_count = (
+        active_cycle.participations.count() if active_cycle is not None else None
+    )
 
     return render(
         request,
@@ -116,6 +131,8 @@ def project_detail(request, pk):
             "memberships": memberships,
             "is_facilitator": is_facilitator,
             "active_cycle": active_cycle,
+            "member_count": member_count,
+            "participation_count": participation_count,
         },
     )
 
@@ -205,6 +222,14 @@ def create_card(request, pk):
             else:
                 card.author = request.user
             card.save()
+
+            # #11: participation is tracked per member (request.user), not
+            # per card and not per Card.author — an anonymous submission
+            # still records that this member submitted, without linking
+            # them to the card. get_or_create relies on the unique
+            # (cycle, member) constraint so a second card from the same
+            # member in the same cycle never creates a second row.
+            CycleParticipation.objects.get_or_create(cycle=cycle, member=request.user)
 
             if form.cleaned_data["anonymous"]:
                 tokens = dict(
