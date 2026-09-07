@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django_q',
     'accounts',
     'projects',
 ]
@@ -138,3 +139,13 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'home'
 LOGOUT_REDIRECT_URL = 'home'
+
+
+# Django-Q2 — Postgres (the existing default DB) as the broker, per
+# stack.md: no Redis, no separate broker service.
+Q_CLUSTER = {
+    'name': 'retroloop',
+    'orm': 'default',
+    'timeout': 600,
+    'retry': 900,
+}
