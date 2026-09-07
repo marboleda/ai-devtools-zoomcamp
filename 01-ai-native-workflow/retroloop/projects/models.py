@@ -579,6 +579,46 @@ class DraftSource(models.TextChoices):
     MANUAL = "manual", "Manual"
 
 
+# -- #22: facilitator review and confirmation of drafts --
+#
+# projects.views.review_drafts is the facilitator-only screen (per #6) that
+# lists every DecisionDraft/ActionItem still awaiting review for the
+# project's active cycle. Confirming sets confirmed_at/confirmed_by; this is
+# the *only* place either field is ever set for an AI-sourced row (#21
+# itself never sets them). Discarding hard-deletes the row per #22's own
+# decision — stack.md defines no "discarded" state, and a rejected
+# unconfirmed row has no further use. A facilitator can also add a brand new
+# manual row from this same screen, saved with source=manual and
+# confirmed_at/confirmed_by already set — there's no draft stage for
+# something the facilitator is typing themselves right now.
+#
+# confirmed_for_cycle below is the query path #23's later published-summary
+# view is expected to use — mirrors Card.objects.visible_to (#10) and
+# Vote.objects.totals_for_cycle (#16): the visibility gate lives in the
+# manager, not repeated inline wherever a caller wants "the confirmed rows".
+
+
+class DecisionDraftQuerySet(models.QuerySet):
+    def unconfirmed_for_cycle(self, *, cycle):
+        """Every DecisionDraft in ``cycle`` still awaiting facilitator
+        review — ``confirmed_at`` is NULL. This is #22's own review screen's
+        listing query.
+        """
+        return self.filter(cycle=cycle, confirmed_at__isnull=True)
+
+    def confirmed_for_cycle(self, *, cycle):
+        """Every DecisionDraft in ``cycle`` eligible for a published summary
+        — ``confirmed_at`` is set. Per stack.md invariant #2, an unreviewed
+        AI suggestion can never reach a published summary even if a caller
+        gets the filtering wrong elsewhere: this is the one query path #23
+        is expected to read from.
+        """
+        return self.filter(cycle=cycle, confirmed_at__isnull=False)
+
+
+DecisionDraftManager = models.Manager.from_queryset(DecisionDraftQuerySet)
+
+
 class DecisionDraft(models.Model):
     """(cycle, topic nullable, text, source, confirmed_at, confirmed_by)
     per stack.md. ``topic`` is left NULL for every row #21 creates: the
@@ -589,6 +629,8 @@ class DecisionDraft(models.Model):
     not something #21's acceptance criteria calls for, so it's left for a
     later issue to add if wanted.
     """
+
+    objects = DecisionDraftManager()
 
     cycle = models.ForeignKey(
         FeedbackCycle, on_delete=models.CASCADE, related_name="decision_drafts"
@@ -616,6 +658,25 @@ class DecisionDraft(models.Model):
         return self.text[:60]
 
 
+class ActionItemQuerySet(models.QuerySet):
+    def unconfirmed_for_cycle(self, *, cycle):
+        """Every ActionItem in ``cycle`` still awaiting facilitator review —
+        ``confirmed_at`` is NULL. Mirrors
+        ``DecisionDraftQuerySet.unconfirmed_for_cycle`` above.
+        """
+        return self.filter(cycle=cycle, confirmed_at__isnull=True)
+
+    def confirmed_for_cycle(self, *, cycle):
+        """Every ActionItem in ``cycle`` eligible for a published summary —
+        ``confirmed_at`` is set. Mirrors
+        ``DecisionDraftQuerySet.confirmed_for_cycle`` above.
+        """
+        return self.filter(cycle=cycle, confirmed_at__isnull=False)
+
+
+ActionItemManager = models.Manager.from_queryset(ActionItemQuerySet)
+
+
 class ActionItem(models.Model):
     """(cycle, topic nullable, description, owner nullable, due_date
     nullable, status, source, confirmed_at, confirmed_by) per stack.md.
@@ -629,6 +690,8 @@ class ActionItem(models.Model):
     class Status(models.TextChoices):
         OPEN = "open", "Open"
         DONE = "done", "Done"
+
+    objects = ActionItemManager()
 
     cycle = models.ForeignKey(
         FeedbackCycle, on_delete=models.CASCADE, related_name="action_items"

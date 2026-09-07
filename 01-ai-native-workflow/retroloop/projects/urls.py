@@ -62,5 +62,36 @@ urlpatterns = [
         views.meeting_upload_status,
         name="meeting_upload_status",
     ),
+    path("<int:pk>/review/", views.review_drafts, name="review_drafts"),
+    path(
+        "<int:pk>/review/decisions/new/",
+        views.create_decision_draft,
+        name="create_decision_draft",
+    ),
+    path(
+        "<int:pk>/review/decisions/<int:draft_id>/confirm/",
+        views.confirm_decision_draft,
+        name="confirm_decision_draft",
+    ),
+    path(
+        "<int:pk>/review/decisions/<int:draft_id>/discard/",
+        views.discard_decision_draft,
+        name="discard_decision_draft",
+    ),
+    path(
+        "<int:pk>/review/actions/new/",
+        views.create_action_item,
+        name="create_action_item",
+    ),
+    path(
+        "<int:pk>/review/actions/<int:item_id>/confirm/",
+        views.confirm_action_item,
+        name="confirm_action_item",
+    ),
+    path(
+        "<int:pk>/review/actions/<int:item_id>/discard/",
+        views.discard_action_item,
+        name="discard_action_item",
+    ),
     path("join/", views.join_project, name="join_project"),
 ]

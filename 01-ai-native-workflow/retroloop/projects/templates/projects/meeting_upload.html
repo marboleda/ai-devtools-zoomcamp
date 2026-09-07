@@ -72,4 +72,6 @@
   {% include "projects/_meeting_upload_status_fragment.html" %}
 </div>
 
+<p><a href="{% url 'review_drafts' project.pk %}">Review decisions and action items</a></p>
+
 <p><a href="{% url 'project_detail' project.pk %}">Back to project</a></p>

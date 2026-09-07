@@ -1,6 +1,9 @@
 from django import forms
+from django.contrib.auth import get_user_model
 
-from .models import Card, Cluster, MeetingRecord, Project
+from .models import ActionItem, Card, Cluster, DecisionDraft, MeetingRecord, Project
+
+User = get_user_model()
 
 
 class ProjectForm(forms.ModelForm):
@@ -133,3 +136,89 @@ class MeetingUploadForm(forms.Form):
             cleaned_data["pasted_text"] = pasted_text
 
         return cleaned_data
+
+
+# -- #22: facilitator review and confirmation of drafts --
+#
+# Each form below backs one row (or one "add new" section) on the review
+# screen. The edit forms (DecisionDraftEditForm, ActionItemEditForm) are
+# bound to the existing draft instance and posted straight to the confirm
+# view — submitting "Confirm" both saves whatever the facilitator changed
+# and confirms it in the same request, satisfying #22's "edit before
+# confirming" requirement without a separate save step. The "new" forms
+# (ManualDecisionForm, ManualActionItemForm) back the "add a decision/action
+# item that didn't come from AI extraction" section of the same screen.
+
+
+def _project_member_queryset(project):
+    """Users who are a member of ``project`` — the choices for an
+    ActionItem's ``owner`` field on the review screen, same restriction
+    projects.extraction._match_owner applies when the AI extracts an owner.
+    """
+    if project is None:
+        return User.objects.none()
+    return User.objects.filter(memberships__project=project)
+
+
+class DecisionDraftEditForm(forms.ModelForm):
+    """Validates an edit to one DecisionDraft's text (#22) — non-blank,
+    same as CardForm's text field, since DecisionDraft.text has no
+    ``blank=True`` on the model either.
+    """
+
+    class Meta:
+        model = DecisionDraft
+        fields = ["text"]
+        widgets = {"text": forms.Textarea(attrs={"rows": 3})}
+
+
+class ActionItemEditForm(forms.ModelForm):
+    """Validates an edit to one ActionItem's owner and/or due date (#22) —
+    the two fields the issue names as editable before confirming. The
+    description is left as AI/manually wrote it; this form never touches it.
+    """
+
+    class Meta:
+        model = ActionItem
+        fields = ["owner", "due_date"]
+        widgets = {"due_date": forms.DateInput(attrs={"type": "date"})}
+
+    def __init__(self, *args, project=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["owner"].queryset = _project_member_queryset(project)
+        self.fields["owner"].required = False
+        self.fields["due_date"].required = False
+
+
+class ManualDecisionForm(forms.ModelForm):
+    """Validates a brand-new decision the facilitator types directly on the
+    review screen (#22) — never came from AI extraction. The view is
+    responsible for setting ``cycle``, ``source=manual``, and
+    ``confirmed_at``/``confirmed_by``; none of those are fields on this form.
+    """
+
+    class Meta:
+        model = DecisionDraft
+        fields = ["text"]
+        widgets = {"text": forms.Textarea(attrs={"rows": 3})}
+
+
+class ManualActionItemForm(forms.ModelForm):
+    """Validates a brand-new action item the facilitator types directly on
+    the review screen (#22). Same cycle/source/confirmed_at/confirmed_by
+    responsibility split as ManualDecisionForm above.
+    """
+
+    class Meta:
+        model = ActionItem
+        fields = ["description", "owner", "due_date"]
+        widgets = {
+            "description": forms.Textarea(attrs={"rows": 3}),
+            "due_date": forms.DateInput(attrs={"type": "date"}),
+        }
+
+    def __init__(self, *args, project=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["owner"].queryset = _project_member_queryset(project)
+        self.fields["owner"].required = False
+        self.fields["due_date"].required = False

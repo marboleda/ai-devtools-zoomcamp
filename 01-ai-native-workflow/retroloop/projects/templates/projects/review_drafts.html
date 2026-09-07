@@ -1,0 +1,86 @@
+<h1>Review drafts — {{ project.name }}</h1>
+<p>{{ cycle.week }} — {{ cycle.get_state_display }}</p>
+
+{% if messages %}
+<ul>
+  {% for message in messages %}
+  <li>{{ message }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<section>
+  <h2>Decisions awaiting review</h2>
+  {% for draft, form in decision_rows %}
+  <div class="decision-draft" data-draft-id="{{ draft.pk }}">
+    <p><em>Source: {{ draft.get_source_display }}</em></p>
+    <form method="post" action="{% url 'confirm_decision_draft' project.pk draft.pk %}">
+      {% csrf_token %}
+      {{ form.text }}
+      {{ form.text.errors }}
+      <button type="submit">Confirm</button>
+    </form>
+    <form method="post" action="{% url 'discard_decision_draft' project.pk draft.pk %}">
+      {% csrf_token %}
+      <button type="submit">Discard</button>
+    </form>
+  </div>
+  {% empty %}
+  <p>No decisions awaiting review.</p>
+  {% endfor %}
+</section>
+
+<section>
+  <h2>Add a decision</h2>
+  <form method="post" action="{% url 'create_decision_draft' project.pk %}">
+    {% csrf_token %}
+    {{ new_decision_form.non_field_errors }}
+    {{ new_decision_form.text }}
+    {{ new_decision_form.text.errors }}
+    <button type="submit">Add decision</button>
+  </form>
+</section>
+
+<section>
+  <h2>Action items awaiting review</h2>
+  {% for item, form in action_rows %}
+  <div class="action-item" data-action-item-id="{{ item.pk }}">
+    <p>{{ item.description }}</p>
+    <p><em>Source: {{ item.get_source_display }}</em></p>
+    <form method="post" action="{% url 'confirm_action_item' project.pk item.pk %}">
+      {% csrf_token %}
+      {{ form.owner.label_tag }} {{ form.owner }}
+      {{ form.owner.errors }}
+      {{ form.due_date.label_tag }} {{ form.due_date }}
+      {{ form.due_date.errors }}
+      <button type="submit">Confirm</button>
+    </form>
+    <form method="post" action="{% url 'discard_action_item' project.pk item.pk %}">
+      {% csrf_token %}
+      <button type="submit">Discard</button>
+    </form>
+  </div>
+  {% empty %}
+  <p>No action items awaiting review.</p>
+  {% endfor %}
+</section>
+
+<section>
+  <h2>Add an action item</h2>
+  <form method="post" action="{% url 'create_action_item' project.pk %}">
+    {% csrf_token %}
+    {{ new_action_item_form.non_field_errors }}
+    {{ new_action_item_form.description.label_tag }}
+    {{ new_action_item_form.description }}
+    {{ new_action_item_form.description.errors }}
+    {{ new_action_item_form.owner.label_tag }}
+    {{ new_action_item_form.owner }}
+    {{ new_action_item_form.owner.errors }}
+    {{ new_action_item_form.due_date.label_tag }}
+    {{ new_action_item_form.due_date }}
+    {{ new_action_item_form.due_date.errors }}
+    <button type="submit">Add action item</button>
+  </form>
+</section>
+
+<p><a href="{% url 'project_detail' project.pk %}">Back to project</a></p>

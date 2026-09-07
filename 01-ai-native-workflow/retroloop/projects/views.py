@@ -14,20 +14,27 @@ from django_q.tasks import async_task
 from .clustering import suggest_clusters_for_cycle
 from .decorators import facilitator_required
 from .forms import (
+    ActionItemEditForm,
     CardEditForm,
     CardForm,
     ClusterNameForm,
     DiscussionNoteForm,
     JoinProjectForm,
+    ManualActionItemForm,
+    ManualDecisionForm,
     MeetingUploadForm,
     ProjectForm,
+    DecisionDraftEditForm,
 )
 from .models import (
     MAX_VOTE_WEIGHT_PER_MEMBER,
+    ActionItem,
     Card,
     Cluster,
     CycleParticipation,
+    DecisionDraft,
     DiscussionTopic,
+    DraftSource,
     FeedbackCycle,
     MeetingRecord,
     Membership,
@@ -1224,3 +1231,192 @@ def meeting_upload_status(request, pk, project, membership):
 
     context = _meeting_upload_status_context(project, cycle)
     return render(request, "projects/_meeting_upload_status_fragment.html", context)
+
+
+# -- #22: facilitator review and confirmation of drafts --
+#
+# Facilitator-only (per #6's decorator), a full page like meeting_upload
+# rather than one of the retrospective board's own htmx-fragment modes: this
+# is a distinct, one-person action, not something every member watches
+# update live. Lists every DecisionDraft/ActionItem for the project's
+# active cycle with confirmed_at still NULL (per #21's extraction, that's
+# every AI-sourced row until a facilitator acts on it here). Each listed
+# row carries its own edit-then-confirm form (submitting "Confirm" saves
+# whatever the facilitator changed and sets confirmed_at/confirmed_by in
+# the same request) and its own one-click "Discard" form (a hard delete,
+# per #22's own decision — stack.md defines no "discarded" state). A
+# separate pair of forms at the bottom lets the facilitator add a brand new
+# decision or action item that didn't come from AI extraction at all;
+# those are saved with source=manual and confirmed immediately, since
+# there's no draft stage for something the facilitator is typing
+# themselves right now.
+
+
+def _active_cycle_or_404(project):
+    """The project's active (non-closed) cycle. Mirrors the "no reachable
+    active cycle" 404 create_card and _get_active_revealed_cycle_or_404 use
+    elsewhere: the review screen and its action endpoints are only ever
+    linked to from an already-rendered page for a project that has one.
+    """
+    cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
+    if cycle is None:
+        raise Http404
+    return cycle
+
+
+def _review_drafts_context(project, cycle):
+    decision_drafts = list(
+        DecisionDraft.objects.unconfirmed_for_cycle(cycle=cycle).order_by("pk")
+    )
+    action_items = list(
+        ActionItem.objects.unconfirmed_for_cycle(cycle=cycle)
+        .select_related("owner")
+        .order_by("pk")
+    )
+    decision_rows = [
+        (draft, DecisionDraftEditForm(instance=draft)) for draft in decision_drafts
+    ]
+    action_rows = [
+        (item, ActionItemEditForm(instance=item, project=project))
+        for item in action_items
+    ]
+    return {
+        "project": project,
+        "cycle": cycle,
+        "decision_rows": decision_rows,
+        "action_rows": action_rows,
+        "new_decision_form": ManualDecisionForm(),
+        "new_action_item_form": ManualActionItemForm(project=project),
+    }
+
+
+@facilitator_required
+def review_drafts(request, pk, project, membership):
+    cycle = _active_cycle_or_404(project)
+    context = _review_drafts_context(project, cycle)
+    return render(request, "projects/review_drafts.html", context)
+
+
+@facilitator_required
+@require_POST
+def confirm_decision_draft(request, pk, draft_id, project, membership):
+    """Save whatever text edit the facilitator made (if any) and confirm
+    this DecisionDraft in the same request — the sole place confirmed_at/
+    confirmed_by ever gets set for an AI-sourced decision (#22's own
+    decision). Only reachable for a draft that's still unconfirmed and
+    belongs to the project's active cycle: get_object_or_404 with those
+    filters means a double-submit or a stale page can't re-confirm (and
+    re-timestamp) an already-confirmed row.
+    """
+    cycle = _active_cycle_or_404(project)
+    draft = get_object_or_404(
+        DecisionDraft, pk=draft_id, cycle=cycle, confirmed_at__isnull=True
+    )
+    form = DecisionDraftEditForm(request.POST, instance=draft)
+    if form.is_valid():
+        draft = form.save(commit=False)
+        draft.confirmed_at = timezone.now()
+        draft.confirmed_by = request.user
+        draft.save()
+        messages.success(request, "Decision confirmed.")
+    else:
+        messages.error(request, "Couldn't confirm that decision — check the text.")
+    return redirect("review_drafts", pk=project.pk)
+
+
+@facilitator_required
+@require_POST
+def discard_decision_draft(request, pk, draft_id, project, membership):
+    """Hard-delete an unconfirmed DecisionDraft — per #22's own decision,
+    there is no soft-delete/"discarded" state: a rejected draft has no
+    further use. Same unconfirmed-only guard as confirm_decision_draft, so
+    an already-confirmed row can never be discarded through this endpoint.
+    """
+    cycle = _active_cycle_or_404(project)
+    draft = get_object_or_404(
+        DecisionDraft, pk=draft_id, cycle=cycle, confirmed_at__isnull=True
+    )
+    draft.delete()
+    messages.success(request, "Decision discarded.")
+    return redirect("review_drafts", pk=project.pk)
+
+
+@facilitator_required
+@require_POST
+def confirm_action_item(request, pk, item_id, project, membership):
+    """Same shape as confirm_decision_draft, for an ActionItem's owner/due
+    date — the two fields #22 names as editable before confirming.
+    """
+    cycle = _active_cycle_or_404(project)
+    item = get_object_or_404(
+        ActionItem, pk=item_id, cycle=cycle, confirmed_at__isnull=True
+    )
+    form = ActionItemEditForm(request.POST, instance=item, project=project)
+    if form.is_valid():
+        item = form.save(commit=False)
+        item.confirmed_at = timezone.now()
+        item.confirmed_by = request.user
+        item.save()
+        messages.success(request, "Action item confirmed.")
+    else:
+        messages.error(request, "Couldn't confirm that action item.")
+    return redirect("review_drafts", pk=project.pk)
+
+
+@facilitator_required
+@require_POST
+def discard_action_item(request, pk, item_id, project, membership):
+    """Hard-delete an unconfirmed ActionItem. Same reasoning and guard as
+    discard_decision_draft above.
+    """
+    cycle = _active_cycle_or_404(project)
+    item = get_object_or_404(
+        ActionItem, pk=item_id, cycle=cycle, confirmed_at__isnull=True
+    )
+    item.delete()
+    messages.success(request, "Action item discarded.")
+    return redirect("review_drafts", pk=project.pk)
+
+
+@facilitator_required
+@require_POST
+def create_decision_draft(request, pk, project, membership):
+    """Add a brand-new decision that didn't come from AI extraction —
+    source=manual, and confirmed immediately (confirmed_at/confirmed_by set
+    on creation) since there's no draft stage for something the facilitator
+    is typing themselves right now, per #22's own decision.
+    """
+    cycle = _active_cycle_or_404(project)
+    form = ManualDecisionForm(request.POST)
+    if form.is_valid():
+        draft = form.save(commit=False)
+        draft.cycle = cycle
+        draft.source = DraftSource.MANUAL
+        draft.confirmed_at = timezone.now()
+        draft.confirmed_by = request.user
+        draft.save()
+        messages.success(request, "Decision added.")
+    else:
+        messages.error(request, "Couldn't add that decision — check the text.")
+    return redirect("review_drafts", pk=project.pk)
+
+
+@facilitator_required
+@require_POST
+def create_action_item(request, pk, project, membership):
+    """Same shape as create_decision_draft, for a manually-added action
+    item.
+    """
+    cycle = _active_cycle_or_404(project)
+    form = ManualActionItemForm(request.POST, project=project)
+    if form.is_valid():
+        item = form.save(commit=False)
+        item.cycle = cycle
+        item.source = DraftSource.MANUAL
+        item.confirmed_at = timezone.now()
+        item.confirmed_by = request.user
+        item.save()
+        messages.success(request, "Action item added.")
+    else:
+        messages.error(request, "Couldn't add that action item — check the description.")
+    return redirect("review_drafts", pk=project.pk)

@@ -39,6 +39,7 @@
   <p><a href="{% url 'board_reveal' project.pk %}">View board</a></p>
   {% if is_facilitator %}
   <p><a href="{% url 'meeting_upload' project.pk %}">Upload meeting recording or transcript</a></p>
+  <p><a href="{% url 'review_drafts' project.pk %}">Review decisions and action items</a></p>
   {% endif %}
   {% endif %}
   {% elif is_facilitator %}
