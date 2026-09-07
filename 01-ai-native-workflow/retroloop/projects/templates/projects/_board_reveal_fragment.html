@@ -1,0 +1,27 @@
+{% if not cycle %}
+<p>No active feedback cycle yet.</p>
+{% elif not revealed %}
+<p>Cards haven't been revealed yet.</p>
+{% else %}
+{% for value, label, cards in category_groups %}
+<section>
+  <h2>{{ label }}</h2>
+  {% if cards %}
+  <ul>
+    {% for card in cards %}
+    <li>
+      {{ card.text }}
+      {% if card.author %}
+      — {{ card.author.username }}
+      {% else %}
+      — Anonymous
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No cards in this category.</p>
+  {% endif %}
+</section>
+{% endfor %}
+{% endif %}

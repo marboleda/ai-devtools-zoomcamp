@@ -1,0 +1,18 @@
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+
+<h1>Reveal — {{ project.name }}</h1>
+{% if cycle %}
+<p>{{ cycle.week }} — {{ cycle.get_state_display }}</p>
+{% endif %}
+
+<!--
+  Shared polling mechanism (stack.md's "~3s", htmx only — no websockets, no
+  Channels): this div re-fetches this same URL every 3 seconds and swaps in
+  the refreshed fragment. #14-#18's cluster/vote/discuss board modes reuse
+  this exact pattern against their own URLs.
+-->
+<div id="board-reveal" hx-get="{% url 'board_reveal' project.pk %}" hx-trigger="every 3s" hx-swap="innerHTML">
+  {% include "projects/_board_reveal_fragment.html" %}
+</div>
+
+<p><a href="{% url 'project_detail' project.pk %}">Back to project</a></p>

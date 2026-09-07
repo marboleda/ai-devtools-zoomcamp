@@ -218,6 +218,58 @@ def reveal_cycle(request, pk, project, membership):
 
 
 @login_required
+def board_reveal(request, pk):
+    # Same single-query, indistinguishable-404 membership lookup as
+    # project_detail: any member (not just the facilitator) can view the
+    # board, but a non-member — or a nonexistent project — gets a plain 404
+    # per #5/#6's decision.
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    # Same "active cycle" convention used throughout (create_card,
+    # reveal_cycle): at most one non-closed cycle per project. Browsing a
+    # past, closed cycle's board is out of scope for now — project_detail's
+    # own "Previous retrospectives" section is still a placeholder.
+    cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
+
+    # "Revealed or later" is read from revealed_at, not state, so this
+    # covers revealed/clustering/voting/discussing alike. #14-#18's
+    # clustering/voting/discussion UI is out of scope: every card is always
+    # grouped by category only, never by cluster, regardless of how far the
+    # cycle has actually progressed.
+    revealed = cycle is not None and cycle.revealed_at is not None
+    category_groups = None
+    if revealed:
+        # Post-reveal, visible_to returns every card in the cycle for any
+        # viewer (#10) — the viewer/anonymous-ids arguments only matter
+        # pre-reveal, which this branch never reaches.
+        cards = list(Card.objects.visible_to(cycle=cycle, viewer=request.user))
+        category_groups = [
+            (value, label, [card for card in cards if card.category == value])
+            for value, label in Card.Category.choices
+        ]
+
+    context = {
+        "project": project,
+        "cycle": cycle,
+        "revealed": revealed,
+        "category_groups": category_groups,
+    }
+
+    # htmx polls this same URL every ~3s (stack.md; the shared mechanism
+    # #14-#18's later board modes reuse). A poll request only needs the
+    # refreshed board content, not the surrounding page chrome/htmx script
+    # tag, so an HX-Request carrying header gets just the fragment.
+    template = (
+        "projects/_board_reveal_fragment.html"
+        if request.headers.get("HX-Request") == "true"
+        else "projects/board_reveal.html"
+    )
+    return render(request, template, context)
+
+
+@login_required
 def create_card(request, pk):
     # Same single-query membership lookup as project_detail /
     # facilitator_required: a nonexistent project and an existing project
