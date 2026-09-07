@@ -56,5 +56,11 @@ urlpatterns = [
         views.withdraw_card,
         name="withdraw_card",
     ),
+    path("<int:pk>/meeting/upload/", views.meeting_upload, name="meeting_upload"),
+    path(
+        "<int:pk>/meeting/upload/status/",
+        views.meeting_upload_status,
+        name="meeting_upload_status",
+    ),
     path("join/", views.join_project, name="join_project"),
 ]

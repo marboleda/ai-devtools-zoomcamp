@@ -37,6 +37,9 @@
   {% endif %}
   {% else %}
   <p><a href="{% url 'board_reveal' project.pk %}">View board</a></p>
+  {% if is_facilitator %}
+  <p><a href="{% url 'meeting_upload' project.pk %}">Upload meeting recording or transcript</a></p>
+  {% endif %}
   {% endif %}
   {% elif is_facilitator %}
   <form method="post" action="{% url 'create_cycle' project.pk %}">

@@ -6,6 +6,7 @@ from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
+from django_q.tasks import async_task
 
 from .clustering import suggest_clusters_for_cycle
 from .decorators import facilitator_required
@@ -15,6 +16,7 @@ from .forms import (
     ClusterNameForm,
     DiscussionNoteForm,
     JoinProjectForm,
+    MeetingUploadForm,
     ProjectForm,
 )
 from .models import (
@@ -24,6 +26,7 @@ from .models import (
     CycleParticipation,
     DiscussionTopic,
     FeedbackCycle,
+    MeetingRecord,
     Membership,
     Project,
     Vote,
@@ -1047,3 +1050,103 @@ def withdraw_card(request, pk, card_id):
 
     messages.success(request, "Card withdrawn.")
     return redirect("create_card", pk=project.pk)
+
+
+# -- #19: meeting upload page --
+#
+# Facilitator-only (per #6's decorator), a full page rather than one of the
+# retrospective board's own htmx-fragment modes (#13/#15/#16/#18) — the
+# board modes all render the same collaborative "board" for every member;
+# this is a distinct, one-person action. It still reuses the board modes'
+# ~3s htmx-polling pattern, just scoped to a small status fragment
+# (_meeting_upload_status_fragment.html) rather than the whole page, since
+# the form itself doesn't need to be re-rendered every poll.
+
+
+def _meeting_upload_status_context(project, cycle):
+    records = list(cycle.meeting_records.all())
+    return {"project": project, "cycle": cycle, "records": records}
+
+
+@facilitator_required
+def meeting_upload(request, pk, project, membership):
+    # Same "active (non-closed) cycle" convention used throughout
+    # (create_card, reveal_cycle, board_reveal): at most one non-closed
+    # cycle can exist per project. There's nothing to upload a meeting
+    # record against without one.
+    cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
+    if cycle is None:
+        raise Http404
+
+    form = MeetingUploadForm()
+
+    if request.method == "POST":
+        form = MeetingUploadForm(request.POST, request.FILES)
+        if form.is_valid():
+            kind = form.cleaned_data["kind"]
+
+            if kind == MeetingRecord.Kind.PASTED_TEXT:
+                # No file, no background job: transcript_text is populated
+                # directly from the form and processing_state goes straight
+                # to completed — there is nothing left to process (#19's
+                # explicit decision), so this can never be "actively
+                # processing" and never blocks a later upload.
+                MeetingRecord.objects.create(
+                    cycle=cycle,
+                    kind=kind,
+                    transcript_text=form.cleaned_data["pasted_text"],
+                    processing_state=MeetingRecord.ProcessingState.COMPLETED,
+                )
+                messages.success(request, "Transcript saved.")
+                return redirect("meeting_upload", pk=project.pk)
+
+            # Only one MeetingRecord can be actively processing per cycle at
+            # a time (#19's decision) — a second audio/video/transcript_file
+            # upload while one is still pending/processing is rejected with
+            # a clear message, not queued behind it. Checked here, inside
+            # the same request that would otherwise create the second row,
+            # rather than left to the queue to sort out later.
+            if MeetingRecord.objects.active_processing_for_cycle(cycle=cycle).exists():
+                form.add_error(
+                    None,
+                    "A meeting record is already being processed for this "
+                    "cycle. Wait for it to finish before uploading another.",
+                )
+            else:
+                record = MeetingRecord.objects.create(
+                    cycle=cycle,
+                    kind=kind,
+                    processing_state=MeetingRecord.ProcessingState.PENDING,
+                )
+                # #20 will implement projects.tasks.process_meeting_record;
+                # django-q2 doesn't validate the dotted path at enqueue time,
+                # only when a worker picks the job up, so this is safe to
+                # enqueue against a stub today.
+                task_id = async_task(
+                    "projects.tasks.process_meeting_record", record.pk
+                )
+                record.task_id = task_id or ""
+                record.save(update_fields=["task_id"])
+                messages.success(
+                    request, "Upload received. Processing has started."
+                )
+                return redirect("meeting_upload", pk=project.pk)
+
+    context = _meeting_upload_status_context(project, cycle)
+    context["form"] = form
+    return render(request, "projects/meeting_upload.html", context)
+
+
+@facilitator_required
+def meeting_upload_status(request, pk, project, membership):
+    """The ~3s htmx poll target for meeting_upload.html's status section
+    (stack.md's polling pattern, reused per #19's own guidance) — returns
+    just the status fragment, never the surrounding page chrome or the
+    upload form.
+    """
+    cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
+    if cycle is None:
+        raise Http404
+
+    context = _meeting_upload_status_context(project, cycle)
+    return render(request, "projects/_meeting_upload_status_fragment.html", context)

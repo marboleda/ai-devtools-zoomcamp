@@ -1,0 +1,75 @@
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+
+<h1>Meeting upload — {{ project.name }}</h1>
+<p>{{ cycle.week }} — {{ cycle.get_state_display }}</p>
+
+{% if messages %}
+<ul>
+  {% for message in messages %}
+  <li>{{ message }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<form
+  id="meeting-upload-form"
+  method="post"
+  enctype="multipart/form-data"
+  action="{% url 'meeting_upload' project.pk %}"
+>
+  {% csrf_token %}
+  {{ form.non_field_errors }}
+
+  <p>
+    {{ form.file.label_tag }}
+    <input
+      type="file"
+      name="file"
+      id="id_file"
+      accept=".mp3,.wav,.m4a,.mp4,.webm,.mov,.txt,.vtt,.srt"
+    >
+    {{ form.file.errors }}
+    <br><small>Audio (mp3/wav/m4a), video (mp4/webm/mov), or a transcript file (txt/vtt/srt). Max 500 MB.</small>
+  </p>
+
+  <p>— or —</p>
+
+  <p>
+    {{ form.pasted_text.label_tag }}
+    {{ form.pasted_text }}
+    {{ form.pasted_text.errors }}
+  </p>
+
+  <button type="submit">Upload</button>
+</form>
+
+<script>
+  (function () {
+    // Client-side half of #19's 500 MB cap (server-side enforcement lives in
+    // MeetingUploadForm.clean) — reject an oversized file before it's even
+    // sent, so the upload/temp-file pipeline stays bounded per stack.md.
+    var MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+    var uploadForm = document.getElementById("meeting-upload-form");
+    if (uploadForm) {
+      uploadForm.addEventListener("submit", function (event) {
+        var fileInput = document.getElementById("id_file");
+        if (fileInput && fileInput.files.length > 0 && fileInput.files[0].size > MAX_UPLOAD_BYTES) {
+          event.preventDefault();
+          window.alert("That file is too large — uploads are capped at 500 MB.");
+        }
+      });
+    }
+  })();
+</script>
+
+<h2>Processing status</h2>
+<div
+  id="meeting-upload-status"
+  hx-get="{% url 'meeting_upload_status' project.pk %}"
+  hx-trigger="every 3s"
+  hx-swap="innerHTML"
+>
+  {% include "projects/_meeting_upload_status_fragment.html" %}
+</div>
+
+<p><a href="{% url 'project_detail' project.pk %}">Back to project</a></p>

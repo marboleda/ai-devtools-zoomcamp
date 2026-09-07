@@ -460,3 +460,87 @@ class DiscussionTopic(models.Model):
 
     def __str__(self):
         return f"#{self.rank} — {self.cluster.name}"
+
+
+# -- #19: meeting upload page --
+#
+# MeetingRecord per stack.md: (cycle, kind, transcript_text,
+# processing_state, task_id, error). Deliberately no file field anywhere on
+# this model — per stack.md's no-persistent-media rule, an uploaded
+# audio/video/transcript file exists only as a request-time upload; #19
+# itself never writes it to disk (streaming it to a temp path for
+# processing, then deleting it, is #20's job). A pasted-text submission has
+# no file at all: transcript_text is populated directly from the form and
+# processing_state is set straight to completed, since there's nothing left
+# to process (see projects.views.meeting_upload).
+
+
+class MeetingRecordQuerySet(models.QuerySet):
+    def active_processing_for_cycle(self, *, cycle):
+        """Every ``MeetingRecord`` in ``cycle`` whose ``processing_state`` is
+        not yet terminal (pending or processing) — the query
+        projects.views.meeting_upload uses to enforce #19's decision that
+        only one MeetingRecord can be actively processing per cycle at a
+        time. A pasted-text record is created with processing_state=completed
+        directly (never pending/processing), so it is never returned here and
+        never blocks a later upload — matching #19's explicit note that
+        pasted text has nothing left "processing".
+        """
+        return self.filter(
+            cycle=cycle,
+            processing_state__in=[
+                MeetingRecord.ProcessingState.PENDING,
+                MeetingRecord.ProcessingState.PROCESSING,
+            ],
+        )
+
+
+MeetingRecordManager = models.Manager.from_queryset(MeetingRecordQuerySet)
+
+
+class MeetingRecord(models.Model):
+    class Kind(models.TextChoices):
+        AUDIO = "audio", "Audio"
+        VIDEO = "video", "Video"
+        TRANSCRIPT_FILE = "transcript_file", "Transcript file"
+        PASTED_TEXT = "pasted_text", "Pasted text"
+
+    class ProcessingState(models.TextChoices):
+        # Not part of stack.md's field list itself (only the field name
+        # ``processing_state`` is specified there) — this specific set of
+        # choices is #19's own decision, kept deliberately simple since the
+        # actual processing pipeline is #20's concern: a job sits pending
+        # until a worker picks it up, moves to processing, and lands on
+        # completed or failed. A pasted-text record skips straight to
+        # completed (see MeetingRecordQuerySet.active_processing_for_cycle
+        # above and the meeting_upload view).
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
+    objects = MeetingRecordManager()
+
+    cycle = models.ForeignKey(
+        FeedbackCycle, on_delete=models.CASCADE, related_name="meeting_records"
+    )
+    kind = models.CharField(max_length=20, choices=Kind.choices)
+    transcript_text = models.TextField(blank=True)
+    processing_state = models.CharField(
+        max_length=20, choices=ProcessingState.choices, default=ProcessingState.PENDING
+    )
+    # The string id django_q.tasks.async_task() returns, kept so a later view
+    # (#20) can look the job up. Blank for a pasted_text record, which never
+    # enqueues anything at all.
+    task_id = models.CharField(max_length=100, blank=True)
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return (
+            f"{self.get_kind_display()} meeting record for {self.cycle} "
+            f"({self.processing_state})"
+        )
