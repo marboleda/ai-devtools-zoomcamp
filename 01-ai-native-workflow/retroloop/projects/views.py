@@ -6,6 +6,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
+from .clustering import suggest_clusters_for_cycle
 from .decorators import facilitator_required
 from .forms import CardEditForm, CardForm, JoinProjectForm, ProjectForm
 from .models import (
@@ -212,6 +213,13 @@ def reveal_cycle(request, pk, project, membership):
     cycle.state = FeedbackCycle.State.REVEALED
     cycle.revealed_at = timezone.now()
     cycle.save(update_fields=["state", "revealed_at"])
+
+    # #14: run once, immediately after reveal succeeds. Synchronous (no
+    # Django-Q2) — that's reserved for the later meeting-transcription
+    # pipeline (#20), not this call. A failed/timed-out API call is
+    # swallowed inside suggest_clusters_for_cycle itself, so the cycle
+    # stays "revealed" either way.
+    suggest_clusters_for_cycle(cycle)
 
     messages.success(request, "Cards revealed.")
     return redirect("project_detail", pk=project.pk)
