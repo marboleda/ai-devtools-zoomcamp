@@ -3,6 +3,7 @@ from django.contrib.auth.decorators import login_required
 from django.db import IntegrityError, transaction
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from .decorators import facilitator_required
@@ -186,6 +187,33 @@ def create_cycle(request, pk, project, membership):
             request, "This project already has an active feedback cycle."
         )
 
+    return redirect("project_detail", pk=project.pk)
+
+
+@facilitator_required
+@require_POST
+def reveal_cycle(request, pk, project, membership):
+    # Same "active cycle" lookup used by create_card: at most one non-closed
+    # cycle can exist per project (DB-enforced), so there is never an
+    # ambiguity about which cycle a bare "reveal" action targets.
+    cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
+
+    # #12's own state check: whether the reveal is allowed is read from
+    # FeedbackCycle.state, never inferred from revealed_at (which this
+    # action itself is about to set). A double-click, a stale page, or an
+    # attempt to reveal a cycle that hasn't started collecting yet all fail
+    # here rather than mutating state a second time.
+    if cycle is None or cycle.state != FeedbackCycle.State.COLLECTING:
+        messages.error(
+            request, "This cycle is not currently collecting submissions."
+        )
+        return redirect("project_detail", pk=project.pk)
+
+    cycle.state = FeedbackCycle.State.REVEALED
+    cycle.revealed_at = timezone.now()
+    cycle.save(update_fields=["state", "revealed_at"])
+
+    messages.success(request, "Cards revealed.")
     return redirect("project_detail", pk=project.pk)
 
 

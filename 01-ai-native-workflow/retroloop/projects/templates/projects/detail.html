@@ -29,6 +29,12 @@
   <p>{{ participation_count }} of {{ member_count }} submitted</p>
   {% if active_cycle.state == "collecting" %}
   <p><a href="{% url 'create_card' project.pk %}">Add a card</a></p>
+  {% if is_facilitator %}
+  <form method="post" action="{% url 'reveal_cycle' project.pk %}">
+    {% csrf_token %}
+    <button type="submit">Reveal cards</button>
+  </form>
+  {% endif %}
   {% endif %}
   {% elif is_facilitator %}
   <form method="post" action="{% url 'create_cycle' project.pk %}">
