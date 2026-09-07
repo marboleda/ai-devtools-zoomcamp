@@ -1,6 +1,7 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db import IntegrityError, transaction
+from django.db.models import Prefetch
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -8,9 +9,10 @@ from django.views.decorators.http import require_POST
 
 from .clustering import suggest_clusters_for_cycle
 from .decorators import facilitator_required
-from .forms import CardEditForm, CardForm, JoinProjectForm, ProjectForm
+from .forms import CardEditForm, CardForm, ClusterNameForm, JoinProjectForm, ProjectForm
 from .models import (
     Card,
+    Cluster,
     CycleParticipation,
     FeedbackCycle,
     Membership,
@@ -275,6 +277,227 @@ def board_reveal(request, pk):
         else "projects/board_reveal.html"
     )
     return render(request, template, context)
+
+
+# -- #15: manual clustering (move / merge / split / rename) --
+#
+# Any member — not only the facilitator (per #15's decision, since plan.md's
+# clustering step describes "the team" doing this) — can act on clusters
+# once the cycle has been revealed. Every mutation below shares the same
+# membership lookup used elsewhere (a non-member and a nonexistent project
+# are both a plain 404) and the same "active, revealed-or-later cycle"
+# lookup, and returns the refreshed board_cluster fragment so the caller
+# (a plain form post or the SortableJS drag handler, both via htmx) can
+# swap it straight into #board-cluster — the same shared poll target #13
+# already refreshes every ~3s, so a change one member makes becomes visible
+# to every other member within one poll interval, not just to the person
+# who made it.
+
+
+def _get_active_revealed_cycle_or_404(project):
+    """The project's active (non-closed) cycle, required to already be
+    revealed. Clustering only ever acts on cards/clusters that are visible
+    to every member, which per stack.md invariant #3 only holds from reveal
+    onward. Mirrors create_card's "no reachable active cycle" 404 — these
+    mutation endpoints are only ever linked to from an already-rendered,
+    post-reveal board, so there is nothing to redirect back to.
+    """
+    cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
+    if cycle is None or cycle.revealed_at is None:
+        raise Http404
+    return cycle
+
+
+def _board_cluster_context(project, cycle, viewer):
+    clusters = list(
+        cycle.clusters.order_by("position", "id").prefetch_related(
+            Prefetch("cards", queryset=Card.objects.order_by("created_at"))
+        )
+    )
+    # Post-reveal, visible_to returns every card in the cycle for any
+    # viewer (#10) — same as board_reveal, just filtered down to the cards
+    # with no cluster assigned.
+    unclustered_cards = list(
+        Card.objects.visible_to(cycle=cycle, viewer=viewer)
+        .filter(cluster__isnull=True)
+        .order_by("created_at")
+    )
+    return {
+        "project": project,
+        "cycle": cycle,
+        "revealed": True,
+        "clusters": clusters,
+        "unclustered_cards": unclustered_cards,
+    }
+
+
+def _render_cluster_fragment(request, project, cycle):
+    context = _board_cluster_context(project, cycle, request.user)
+    return render(request, "projects/_board_cluster_fragment.html", context)
+
+
+def _parse_cluster_pk(raw_value):
+    """Parse a POST-supplied cluster id into an int, or ``None`` for a
+    blank/absent value (used for "unclustered"). A non-numeric value (a
+    malformed or tampered request — never produced by this app's own
+    templates/JS) is treated as Http404 rather than crashing the request
+    with an unhandled ValueError from the ORM.
+    """
+    raw_value = (raw_value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return int(raw_value)
+    except ValueError:
+        raise Http404
+
+
+@login_required
+def board_cluster(request, pk):
+    # Same single-query, indistinguishable-404 membership lookup as
+    # board_reveal: any member can view the board.
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
+    revealed = cycle is not None and cycle.revealed_at is not None
+
+    if revealed:
+        context = _board_cluster_context(project, cycle, request.user)
+    else:
+        context = {
+            "project": project,
+            "cycle": cycle,
+            "revealed": False,
+            "clusters": None,
+            "unclustered_cards": None,
+        }
+
+    # Same htmx poll-fragment convention as board_reveal: an HX-Request gets
+    # just the refreshed board content, not the surrounding page chrome.
+    template = (
+        "projects/_board_cluster_fragment.html"
+        if request.headers.get("HX-Request") == "true"
+        else "projects/board_cluster.html"
+    )
+    return render(request, template, context)
+
+
+@login_required
+@require_POST
+def move_card(request, pk, card_id):
+    """Move a single card to a different cluster, or to unclustered
+    (``cluster_id`` blank/absent). This is the action SortableJS's onEnd
+    handler calls on every drag. Never touches cluster origin — that only
+    changes on merge/split.
+    """
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    cycle = _get_active_revealed_cycle_or_404(project)
+    card = get_object_or_404(Card, pk=card_id, cycle=cycle)
+
+    cluster_pk = _parse_cluster_pk(request.POST.get("cluster_id"))
+    if cluster_pk is not None:
+        card.cluster = get_object_or_404(Cluster, pk=cluster_pk, cycle=cycle)
+    else:
+        card.cluster = None
+    card.save(update_fields=["cluster"])
+
+    return _render_cluster_fragment(request, project, cycle)
+
+
+@login_required
+@require_POST
+def rename_cluster(request, pk, cluster_id):
+    """Rename any cluster, regardless of origin (#15) — suggested and
+    human clusters are renamed through the exact same path.
+    """
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    cycle = _get_active_revealed_cycle_or_404(project)
+    cluster = get_object_or_404(Cluster, pk=cluster_id, cycle=cycle)
+
+    form = ClusterNameForm(request.POST, instance=cluster)
+    if form.is_valid():
+        form.save()
+
+    return _render_cluster_fragment(request, project, cycle)
+
+
+@login_required
+@require_POST
+def merge_clusters(request, pk, cluster_id):
+    """Merge the cluster named in the URL (the source) into
+    ``target_cluster_id`` (the drop target), per #15's decision: the merged
+    cluster keeps the target's name, its origin becomes human (it's now a
+    human-driven grouping, even if the target started out suggested), and
+    the source cluster's cards all move over. The now-empty source cluster
+    is removed rather than left behind as an empty husk.
+    """
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    cycle = _get_active_revealed_cycle_or_404(project)
+    source = get_object_or_404(Cluster, pk=cluster_id, cycle=cycle)
+
+    target_pk = _parse_cluster_pk(request.POST.get("target_cluster_id"))
+    target = get_object_or_404(Cluster, pk=target_pk, cycle=cycle) if target_pk is not None else None
+
+    if target is not None and target.pk != source.pk:
+        Card.objects.filter(cluster=source).update(cluster=target)
+        if target.origin != Cluster.Origin.HUMAN:
+            target.origin = Cluster.Origin.HUMAN
+            target.save(update_fields=["origin"])
+        source.delete()
+
+    return _render_cluster_fragment(request, project, cycle)
+
+
+@login_required
+@require_POST
+def split_cluster(request, pk, cluster_id):
+    """Split a subset of the cluster's cards (``card_ids``, one or more
+    POST values) out into a brand new cluster, leaving the rest of the
+    cards in the original. Per #15's decision, the new cluster is
+    ``origin=human`` — it's a human-driven grouping now — regardless of
+    the source cluster's own origin, which this view never changes.
+    """
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    cycle = _get_active_revealed_cycle_or_404(project)
+    source = get_object_or_404(Cluster, pk=cluster_id, cycle=cycle)
+
+    # Only cards that actually belong to this cluster right now can be
+    # split out — an ID for a card elsewhere (a different cluster,
+    # unclustered, or another cycle entirely) is silently ignored rather
+    # than pulled in from wherever it happens to be. A non-numeric value
+    # (malformed/tampered request) is dropped the same way instead of
+    # crashing the request with an unhandled ValueError from the ORM.
+    card_ids = [
+        int(raw_value) for raw_value in request.POST.getlist("card_ids")
+        if raw_value.strip().isdigit()
+    ]
+    cards_to_move = Card.objects.filter(pk__in=card_ids, cluster=source)
+
+    if cards_to_move.exists():
+        name = (request.POST.get("name") or "").strip() or f"{source.name} (split)"
+        new_cluster = Cluster.objects.create(
+            cycle=cycle,
+            name=name[:200],
+            origin=Cluster.Origin.HUMAN,
+            position=cycle.clusters.count(),
+        )
+        cards_to_move.update(cluster=new_cluster)
+
+    return _render_cluster_fragment(request, project, cycle)
 
 
 @login_required

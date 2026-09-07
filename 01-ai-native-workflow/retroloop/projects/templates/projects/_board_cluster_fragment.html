@@ -1,0 +1,95 @@
+{% if not cycle %}
+<p>No active feedback cycle yet.</p>
+{% elif not revealed %}
+<p>Cards haven't been revealed yet.</p>
+{% else %}
+<input type="hidden" id="cluster-csrf-token" value="{{ csrf_token }}">
+<div id="cluster-move-url-template" data-template="{% url 'move_card' project.pk 0 %}" hidden></div>
+
+{% for cluster in clusters %}
+<section class="cluster" data-cluster-id="{{ cluster.pk }}">
+  <h2>{{ cluster.name }} <small>({{ cluster.get_origin_display }})</small></h2>
+
+  <form hx-post="{% url 'rename_cluster' project.pk cluster.pk %}" hx-target="#board-cluster" hx-swap="innerHTML">
+    {% csrf_token %}
+    <input type="text" name="name" value="{{ cluster.name }}" maxlength="200">
+    <button type="submit">Rename</button>
+  </form>
+
+  {% if clusters|length > 1 %}
+  <form hx-post="{% url 'merge_clusters' project.pk cluster.pk %}" hx-target="#board-cluster" hx-swap="innerHTML">
+    {% csrf_token %}
+    <label>
+      Merge into:
+      <select name="target_cluster_id">
+        {% for other in clusters %}
+        {% if other.pk != cluster.pk %}
+        <option value="{{ other.pk }}">{{ other.name }}</option>
+        {% endif %}
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Merge</button>
+  </form>
+  {% endif %}
+
+  <form hx-post="{% url 'split_cluster' project.pk cluster.pk %}" hx-target="#board-cluster" hx-swap="innerHTML">
+    {% csrf_token %}
+    <ul class="cluster-cards" data-cluster-id="{{ cluster.pk }}">
+      {% for card in cluster.cards.all %}
+      <li data-card-id="{{ card.pk }}">
+        <label>
+          <input type="checkbox" name="card_ids" value="{{ card.pk }}">
+          {{ card.text }}
+          {% if card.author %} — {{ card.author.username }}{% else %} — Anonymous{% endif %}
+        </label>
+      </li>
+      {% endfor %}
+    </ul>
+    <input type="text" name="name" placeholder="New cluster name">
+    <button type="submit">Split selected into new cluster</button>
+  </form>
+</section>
+{% empty %}
+<p>No clusters yet.</p>
+{% endfor %}
+
+<section class="cluster" data-cluster-id="">
+  <h2>Unclustered</h2>
+  <ul class="cluster-cards" data-cluster-id="">
+    {% for card in unclustered_cards %}
+    <li data-card-id="{{ card.pk }}">
+      {{ card.text }}
+      {% if card.author %} — {{ card.author.username }}{% else %} — Anonymous{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
+<script>
+(function () {
+  if (typeof Sortable === "undefined" || typeof htmx === "undefined") return;
+  var csrfInput = document.getElementById("cluster-csrf-token");
+  var csrftoken = csrfInput ? csrfInput.value : "";
+  var template = document.getElementById("cluster-move-url-template");
+  var urlTemplate = template ? template.dataset.template : "";
+
+  document.querySelectorAll(".cluster-cards").forEach(function (list) {
+    new Sortable(list, {
+      group: "cluster-cards",
+      animation: 150,
+      onEnd: function (evt) {
+        var cardId = evt.item.dataset.cardId;
+        var clusterId = evt.to.dataset.clusterId || "";
+        var url = urlTemplate.replace("/cards/0/move/", "/cards/" + cardId + "/move/");
+        htmx.ajax("POST", url, {
+          target: "#board-cluster",
+          swap: "innerHTML",
+          values: { cluster_id: clusterId, csrfmiddlewaretoken: csrftoken }
+        });
+      }
+    });
+  });
+})();
+</script>
+{% endif %}

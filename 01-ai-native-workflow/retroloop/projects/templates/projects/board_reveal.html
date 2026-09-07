@@ -5,6 +5,8 @@
 <p>{{ cycle.week }} — {{ cycle.get_state_display }}</p>
 {% endif %}
 
+<p><a href="{% url 'board_cluster' project.pk %}">Cluster mode</a></p>
+
 <!--
   Shared polling mechanism (stack.md's "~3s", htmx only — no websockets, no
   Channels): this div re-fetches this same URL every 3 seconds and swaps in

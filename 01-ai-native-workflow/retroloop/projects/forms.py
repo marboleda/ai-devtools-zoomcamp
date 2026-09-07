@@ -1,6 +1,6 @@
 from django import forms
 
-from .models import Card, Project
+from .models import Card, Cluster, Project
 
 
 class ProjectForm(forms.ModelForm):
@@ -41,3 +41,15 @@ class CardEditForm(CardForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         del self.fields["anonymous"]
+
+
+class ClusterNameForm(forms.ModelForm):
+    """Validates a cluster rename (#15): non-blank (CharField strips
+    whitespace before validating, same as CardForm), capped at Cluster.name's
+    own max_length. Works identically regardless of the cluster's origin —
+    this form never touches that field.
+    """
+
+    class Meta:
+        model = Cluster
+        fields = ["name"]

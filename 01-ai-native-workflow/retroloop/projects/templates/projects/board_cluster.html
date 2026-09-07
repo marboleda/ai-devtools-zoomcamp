@@ -1,0 +1,23 @@
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+
+<h1>Cluster — {{ project.name }}</h1>
+{% if cycle %}
+<p>{{ cycle.week }} — {{ cycle.get_state_display }}</p>
+{% endif %}
+
+<p><a href="{% url 'board_reveal' project.pk %}">Reveal mode</a></p>
+
+<!--
+  Same shared polling mechanism board_reveal (#13) uses: this div re-fetches
+  this same URL every 3 seconds and swaps in the refreshed fragment, so a
+  move/merge/split/rename any member makes (#15) becomes visible to every
+  other member within one poll interval. SortableJS-driven drags and the
+  rename/merge/split forms below also target this same div/URL, so every
+  action refreshes the board the same way a poll tick does.
+-->
+<div id="board-cluster" hx-get="{% url 'board_cluster' project.pk %}" hx-trigger="every 3s" hx-swap="innerHTML">
+  {% include "projects/_board_cluster_fragment.html" %}
+</div>
+
+<p><a href="{% url 'project_detail' project.pk %}">Back to project</a></p>
