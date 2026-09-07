@@ -1,0 +1,40 @@
+{% if not cycle %}
+<p>No active feedback cycle yet.</p>
+{% elif not revealed %}
+<p>Cards haven't been revealed yet.</p>
+{% else %}
+{% comment %}
+Deliberately no cluster vote totals anywhere on this fragment — not for
+this viewer, not for the facilitator, not for anyone — while voting is
+open. Vote.objects.totals_for_cycle (#16/#10's pattern) refuses to
+compute one before cycle.voting_closed_at is set, and this view never
+calls it at all; only each viewer's own vote weight on each cluster is
+ever shown here.
+{% endcomment %}
+{% if voting_closed %}
+<p>Voting is closed.</p>
+{% else %}
+<p>You have {{ votes_remaining }} of {{ max_vote_weight }} votes left.</p>
+{% endif %}
+
+{% for cluster, own_weight in clusters_with_own_votes %}
+<section class="cluster" data-cluster-id="{{ cluster.pk }}">
+  <h2>{{ cluster.name }}</h2>
+  <p>Your votes here: {{ own_weight }}</p>
+  {% if not voting_closed %}
+  <form method="post" action="{% url 'cast_vote' project.pk cluster.pk %}">
+    {% csrf_token %}
+    <input type="hidden" name="delta" value="1">
+    <button type="submit" {% if votes_remaining <= 0 %}disabled{% endif %}>+1 vote</button>
+  </form>
+  <form method="post" action="{% url 'cast_vote' project.pk cluster.pk %}">
+    {% csrf_token %}
+    <input type="hidden" name="delta" value="-1">
+    <button type="submit">-1 vote</button>
+  </form>
+  {% endif %}
+</section>
+{% empty %}
+<p>No clusters yet.</p>
+{% endfor %}
+{% endif %}

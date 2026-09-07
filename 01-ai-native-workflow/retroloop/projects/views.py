@@ -11,12 +11,14 @@ from .clustering import suggest_clusters_for_cycle
 from .decorators import facilitator_required
 from .forms import CardEditForm, CardForm, ClusterNameForm, JoinProjectForm, ProjectForm
 from .models import (
+    MAX_VOTE_WEIGHT_PER_MEMBER,
     Card,
     Cluster,
     CycleParticipation,
     FeedbackCycle,
     Membership,
     Project,
+    Vote,
     generate_edit_token,
     hash_edit_token,
 )
@@ -498,6 +500,167 @@ def split_cluster(request, pk, cluster_id):
         cards_to_move.update(cluster=new_cluster)
 
     return _render_cluster_fragment(request, project, cycle)
+
+
+# -- #16: voting on clusters --
+#
+# Any member (not just the facilitator, same reasoning as #15's clustering
+# actions) can freely add to or retract from their own vote allocation on
+# any cluster, any number of times, at any point after reveal and before
+# ``cycle.voting_closed_at`` is set (#17 sets that later; out of scope
+# here). Three stackable votes per member per cycle — see
+# MAX_VOTE_WEIGHT_PER_MEMBER and Vote in projects.models. No view here (or
+# anywhere else in the codebase) reads Vote.objects.totals_for_cycle before
+# voting closes — that manager method itself refuses to answer pre-close,
+# per stack.md invariant #3, mirroring #10's Card.objects.visible_to.
+
+
+def _board_vote_context(project, cycle, viewer):
+    clusters = list(cycle.clusters.order_by("position", "id"))
+    # Only ever this viewer's own allocation — never an aggregate across
+    # members, which Vote.objects.totals_for_cycle refuses to compute
+    # before voting closes anyway (see that method's docstring).
+    own_votes = {
+        vote.cluster_id: vote.weight
+        for vote in Vote.objects.for_member_in_cycle(cycle=cycle, member=viewer)
+    }
+    # (cluster, this viewer's own weight on it) pairs — built here rather
+    # than left as a separate dict for the template to key into, the same
+    # way board_reveal's category_groups pre-pairs each category with its
+    # cards.
+    clusters_with_own_votes = [
+        (cluster, own_votes.get(cluster.pk, 0)) for cluster in clusters
+    ]
+    votes_used = sum(own_votes.values())
+    return {
+        "project": project,
+        "cycle": cycle,
+        "revealed": True,
+        "clusters_with_own_votes": clusters_with_own_votes,
+        "votes_used": votes_used,
+        "votes_remaining": MAX_VOTE_WEIGHT_PER_MEMBER - votes_used,
+        "max_vote_weight": MAX_VOTE_WEIGHT_PER_MEMBER,
+        "voting_closed": cycle.voting_closed_at is not None,
+    }
+
+
+def _render_vote_fragment(request, project, cycle):
+    context = _board_vote_context(project, cycle, request.user)
+    return render(request, "projects/_board_vote_fragment.html", context)
+
+
+@login_required
+def board_vote(request, pk):
+    # Same single-query, indistinguishable-404 membership lookup as
+    # board_reveal/board_cluster: any member can view the board.
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
+    revealed = cycle is not None and cycle.revealed_at is not None
+
+    if revealed:
+        context = _board_vote_context(project, cycle, request.user)
+    else:
+        context = {
+            "project": project,
+            "cycle": cycle,
+            "revealed": False,
+            "clusters_with_own_votes": None,
+            "votes_used": None,
+            "votes_remaining": None,
+            "max_vote_weight": MAX_VOTE_WEIGHT_PER_MEMBER,
+            "voting_closed": None,
+        }
+
+    # Same htmx poll-fragment convention as board_reveal/board_cluster: an
+    # HX-Request gets just the refreshed board content, not the
+    # surrounding page chrome.
+    template = (
+        "projects/_board_vote_fragment.html"
+        if request.headers.get("HX-Request") == "true"
+        else "projects/board_vote.html"
+    )
+    return render(request, template, context)
+
+
+@login_required
+@require_POST
+def cast_vote(request, pk, cluster_id):
+    """Add (``delta=1``) or retract (``delta=-1``) one vote on a single
+    cluster for the current member, in the project's active cycle. This is
+    the one endpoint for every reallocation: adding to a cluster's pile,
+    retracting from it, or moving a vote between clusters (retract on one,
+    add on the other) — voting is an ongoing allocation, not a one-shot
+    submit (#16's own decision), so it's designed to be called repeatedly.
+
+    The 3-vote cap is enforced here, server side, regardless of what the
+    client UI would have allowed: ``delta`` itself can only ever add or
+    remove exactly one vote per request (any other value is a 404, the
+    same "not reachable through this app's own UI" treatment
+    split_cluster/move_card give a malformed request), so a crafted
+    request cannot claim a bigger jump in one call. Cross-request races —
+    two near-simultaneous "add a vote" calls from the same member, e.g. a
+    doubled click or a scripted flood — are closed by locking the cycle
+    row (``select_for_update``) inside a transaction before reading this
+    member's current total, so the two calls serialize instead of both
+    reading the same pre-update total and together exceeding 3. Mirrors
+    Project.save's use of transaction.atomic for the same class of
+    check-then-write race.
+    """
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    cycle = _get_active_revealed_cycle_or_404(project)
+    if cycle.voting_closed_at is not None:
+        # Not reachable through this app's own UI once voting has closed —
+        # same treatment move_card gives a pre-reveal attempt.
+        raise Http404
+    cluster = get_object_or_404(Cluster, pk=cluster_id, cycle=cycle)
+
+    raw_delta = request.POST.get("delta")
+    if raw_delta not in ("1", "-1"):
+        raise Http404
+    delta = int(raw_delta)
+
+    with transaction.atomic():
+        # Locking the cycle row serializes every vote-cast request against
+        # this cycle, so two near-simultaneous requests from the same
+        # member can't both read the same pre-update total — including the
+        # very first vote a member casts, before any Vote row of theirs
+        # exists yet to lock instead.
+        FeedbackCycle.objects.select_for_update().get(pk=cycle.pk)
+
+        existing_votes = list(Vote.objects.filter(cycle=cycle, member=request.user))
+        current_total = sum(vote.weight for vote in existing_votes)
+        vote_here = next(
+            (vote for vote in existing_votes if vote.cluster_id == cluster.pk), None
+        )
+
+        if delta > 0:
+            if current_total >= MAX_VOTE_WEIGHT_PER_MEMBER:
+                messages.error(
+                    request,
+                    f"You've already used all {MAX_VOTE_WEIGHT_PER_MEMBER} of your votes.",
+                )
+            elif vote_here is not None:
+                vote_here.weight += 1
+                vote_here.save(update_fields=["weight"])
+            else:
+                Vote.objects.create(
+                    cycle=cycle, member=request.user, cluster=cluster, weight=1
+                )
+        elif vote_here is not None:
+            if vote_here.weight <= 1:
+                vote_here.delete()
+            else:
+                vote_here.weight -= 1
+                vote_here.save(update_fields=["weight"])
+        # else: retracting from a cluster with no vote on it is a no-op.
+
+    return _render_vote_fragment(request, project, cycle)
 
 
 @login_required

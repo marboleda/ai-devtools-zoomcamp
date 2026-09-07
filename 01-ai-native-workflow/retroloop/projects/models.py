@@ -258,3 +258,122 @@ class Card(models.Model):
 
     def __str__(self):
         return f"{self.get_category_display()} card in {self.cycle}"
+
+
+# -- #16: voting on clusters --
+#
+# Three stackable votes per member per cycle, spent on clusters only (a card
+# left unclustered has nothing to vote on — stack.md's Vote model has no
+# card FK at all). Reallocating is ongoing, not a one-shot submit: a member
+# can add to, retract from, or move between clusters at any time before
+# ``cycle.voting_closed_at`` is set (#17's later job). The 3-vote cap and
+# the pre-close privacy gate both live here / in projects.views.cast_vote,
+# never only in a template — see VoteQuerySet.totals_for_cycle below and
+# its use of stack.md invariant #3, the same pattern Card.objects.visible_to
+# (#10) uses for pre-reveal cards.
+
+MAX_VOTE_WEIGHT_PER_MEMBER = 3
+
+
+class VotingStillOpen(Exception):
+    """Raised by Vote.objects.totals_for_cycle when
+    ``cycle.voting_closed_at`` is not yet set. There is no facilitator
+    exception and no way to opt out of the gate: a caller that wants
+    cluster vote totals before voting has closed gets an exception, not an
+    empty/partial queryset it could mistake for "no votes yet". Closing
+    voting and reading totals after that point is #17's job, not this
+    one's — this exception is what #17's view will need to stop tripping.
+    """
+
+
+class VoteQuerySet(models.QuerySet):
+    def for_member_in_cycle(self, *, cycle, member):
+        """``member``'s own vote rows in ``cycle`` — never anyone else's,
+        so this needs no privacy gate: a member always knows their own
+        current allocation, before or after voting closes. Used to render
+        "your votes" in the vote-mode board and to compute how many of the
+        member's 3 votes remain unspent.
+        """
+        return self.filter(cycle=cycle, member=member)
+
+    def total_weight_for_member_in_cycle(self, *, cycle, member):
+        """The sum of ``weight`` across every vote ``member`` currently has
+        in ``cycle`` — used to enforce the 3-vote cap in
+        projects.views.cast_vote. Same no-gate reasoning as
+        ``for_member_in_cycle``: this is only ever the caller's own total.
+        """
+        total = self.filter(cycle=cycle, member=member).aggregate(
+            total=models.Sum("weight")
+        )["total"]
+        return total or 0
+
+    def totals_for_cycle(self, *, cycle):
+        """``{cluster_id: total_weight}`` across every member's vote in
+        ``cycle`` — the number #17's discussion-agenda ranking will need.
+
+        Gated per stack.md invariant #3, the same way
+        ``Card.objects.visible_to`` gates pre-reveal cards (#10): raises
+        ``VotingStillOpen`` while ``cycle.voting_closed_at`` is unset. This
+        is the *only* path to an aggregate vote count anywhere in the
+        codebase — no view, template, or other manager method computes one
+        itself, so a total is simply unreachable through the query layer
+        until voting closes, for any caller including the facilitator.
+        """
+        if cycle.voting_closed_at is None:
+            raise VotingStillOpen(
+                "Vote totals are not available until voting closes."
+            )
+        return dict(
+            self.filter(cycle=cycle)
+            .values("cluster")
+            .annotate(total=models.Sum("weight"))
+            .values_list("cluster", "total")
+        )
+
+
+VoteManager = models.Manager.from_queryset(VoteQuerySet)
+
+
+class Vote(models.Model):
+    """(cycle, member, cluster, weight) per stack.md. One row per
+    (cycle, member, cluster) rather than one row per individual vote:
+    ``weight`` holds how many of the member's three stackable votes are
+    piled onto that cluster, so "add another vote to a cluster I've
+    already voted on" is an update to an existing row, not a second insert
+    that would need merging later. A row's weight is always >= 1 —
+    retracting a cluster's last vote deletes the row instead of leaving a
+    weight=0 husk behind (see projects.views.cast_vote).
+
+    ``cluster`` is CASCADE, not SET_NULL like Card.cluster: a vote only
+    ever means something in relation to the cluster it's on, so a deleted
+    cluster's votes are meaningless and go with it — unlike a card, which
+    can legitimately exist unclustered.
+    """
+
+    objects = VoteManager()
+
+    cycle = models.ForeignKey(FeedbackCycle, on_delete=models.CASCADE, related_name="votes")
+    member = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="votes"
+    )
+    cluster = models.ForeignKey(Cluster, on_delete=models.CASCADE, related_name="votes")
+    weight = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        constraints = [
+            # One row per (cycle, member, cluster): a second vote on a
+            # cluster the member already voted on increments this row's
+            # weight rather than creating a sibling row.
+            models.UniqueConstraint(
+                fields=["cycle", "member", "cluster"], name="unique_vote_per_member_cluster"
+            ),
+            # Belt-and-suspenders alongside the view-level cap check: a
+            # weight can never be created or left at zero-or-below at the
+            # database level either.
+            models.CheckConstraint(
+                condition=models.Q(weight__gte=1), name="vote_weight_at_least_one"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.member} — {self.weight} vote(s) on {self.cluster}"

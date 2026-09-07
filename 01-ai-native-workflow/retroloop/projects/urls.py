@@ -29,6 +29,12 @@ urlpatterns = [
         views.split_cluster,
         name="split_cluster",
     ),
+    path("<int:pk>/board/vote/", views.board_vote, name="board_vote"),
+    path(
+        "<int:pk>/board/vote/clusters/<int:cluster_id>/cast/",
+        views.cast_vote,
+        name="cast_vote",
+    ),
     path("<int:pk>/cards/new/", views.create_card, name="create_card"),
     path("<int:pk>/cards/<int:card_id>/edit/", views.edit_card, name="edit_card"),
     path(

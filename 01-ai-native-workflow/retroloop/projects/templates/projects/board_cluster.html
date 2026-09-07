@@ -6,7 +6,7 @@
 <p>{{ cycle.week }} — {{ cycle.get_state_display }}</p>
 {% endif %}
 
-<p><a href="{% url 'board_reveal' project.pk %}">Reveal mode</a></p>
+<p><a href="{% url 'board_reveal' project.pk %}">Reveal mode</a> | <a href="{% url 'board_vote' project.pk %}">Vote mode</a></p>
 
 <!--
   Same shared polling mechanism board_reveal (#13) uses: this div re-fetches
