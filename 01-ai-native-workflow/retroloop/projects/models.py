@@ -534,6 +534,15 @@ class MeetingRecord(models.Model):
     # enqueues anything at all.
     task_id = models.CharField(max_length=100, blank=True)
     error = models.TextField(blank=True)
+    # Populated by #21's extraction call alongside the DecisionDraft/
+    # ActionItem rows it creates — not part of stack.md's original field
+    # list for MeetingRecord, added here since the extraction tool's output
+    # includes a short summary (per #21's own acceptance criteria: "...and
+    # a short summary") and nothing else in the schema has a home for it
+    # yet. Blank until extraction has actually run (or if it never
+    # produced one); reviewing/publishing this text is #22/#23's job, not
+    # this one's.
+    extracted_summary = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -544,3 +553,115 @@ class MeetingRecord(models.Model):
             f"{self.get_kind_display()} meeting record for {self.cycle} "
             f"({self.processing_state})"
         )
+
+
+# -- #21: AI extraction of decisions and action items --
+#
+# Once a MeetingRecord's transcript_text is populated and its cycle has at
+# least one DiscussionTopic with a non-blank outcome (i.e. #18's discussion
+# mode has resolved at least one topic), projects.extraction sends the
+# transcript and the discussed topics to the Anthropic API (tool-use, per
+# stack.md) and writes the response as DecisionDraft/ActionItem rows below.
+# Every row this call creates has confirmed_at=NULL (and confirmed_by=NULL)
+# — per stack.md invariant #2, nothing from an AI call is visible in a
+# published summary until a facilitator confirms it, which is #22's job,
+# not this one's.
+
+
+class DraftSource(models.TextChoices):
+    """Shared by DecisionDraft.source and ActionItem.source. Every row #21
+    itself creates is tagged AI; MANUAL exists per stack.md/plan.md for
+    #22's later "record a decision/action manually during the meeting"
+    path — this issue never creates a MANUAL row.
+    """
+
+    AI = "ai", "AI"
+    MANUAL = "manual", "Manual"
+
+
+class DecisionDraft(models.Model):
+    """(cycle, topic nullable, text, source, confirmed_at, confirmed_by)
+    per stack.md. ``topic`` is left NULL for every row #21 creates: the
+    extraction tool schema is deliberately kept to exactly what #21's own
+    guidance names (decision text, action description/owner/due-date, and
+    a summary) rather than also asking the model to line up each decision
+    with one of the discussed topics' ids — a reasonable enhancement, but
+    not something #21's acceptance criteria calls for, so it's left for a
+    later issue to add if wanted.
+    """
+
+    cycle = models.ForeignKey(
+        FeedbackCycle, on_delete=models.CASCADE, related_name="decision_drafts"
+    )
+    topic = models.ForeignKey(
+        DiscussionTopic,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="decision_drafts",
+    )
+    text = models.TextField()
+    source = models.CharField(max_length=20, choices=DraftSource.choices)
+    # NULL until a facilitator confirms this draft (#22) — never set here.
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="confirmed_decision_drafts",
+    )
+
+    def __str__(self):
+        return self.text[:60]
+
+
+class ActionItem(models.Model):
+    """(cycle, topic nullable, description, owner nullable, due_date
+    nullable, status, source, confirmed_at, confirmed_by) per stack.md.
+    Same ``topic``-left-NULL reasoning as DecisionDraft above. ``owner`` is
+    matched against the cycle's project membership by name (see
+    projects.extraction._match_owner); an unmatched name leaves this NULL
+    rather than guessing, per stack.md. ``due_date`` is NULL unless the
+    transcript explicitly stated one — never inferred.
+    """
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        DONE = "done", "Done"
+
+    cycle = models.ForeignKey(
+        FeedbackCycle, on_delete=models.CASCADE, related_name="action_items"
+    )
+    topic = models.ForeignKey(
+        DiscussionTopic,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="action_items",
+    )
+    description = models.TextField()
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="owned_action_items",
+    )
+    due_date = models.DateField(null=True, blank=True)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.OPEN
+    )
+    source = models.CharField(max_length=20, choices=DraftSource.choices)
+    # NULL until a facilitator confirms this draft (#22) — never set here.
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="confirmed_action_items",
+    )
+
+    def __str__(self):
+        return self.description[:60]

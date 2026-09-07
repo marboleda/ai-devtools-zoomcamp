@@ -2,18 +2,25 @@
 
 Submitting creates one MeetingRecord row for the project's active cycle,
 with `kind` set to the input type. Pasted text and transcript_file both have
-nothing left to process (no background job needed) — transcript_text is
-populated directly (from the form, or by reading+decoding the uploaded file)
-and processing_state goes straight to "completed". This transcript_file
-behavior is a retroactive fix made as part of #20 (see the comment on issue
-#20): #19's original implementation queued transcript_file through the same
-background job as audio/video, contradicting #20's own acceptance criteria.
-Only audio/video now enqueue a Django-Q2 background job via
-django_q.tasks.async_task, which is patched rather than allowed to actually
-run (no worker runs during the test suite anyway) — and #20 additionally
-writes that upload to a local temp file before enqueuing it, since a
-background worker is a separate process from the request that received the
-upload.
+nothing left to transcribe (no transcription background job needed) —
+transcript_text is populated directly (from the form, or by
+reading+decoding the uploaded file) and processing_state goes straight to
+"completed". This transcript_file behavior is a retroactive fix made as
+part of #20 (see the comment on issue #20): #19's original implementation
+queued transcript_file through the same background job as audio/video,
+contradicting #20's own acceptance criteria. Only audio/video enqueue
+projects.tasks.process_meeting_record via django_q.tasks.async_task, which
+is patched rather than allowed to actually run (no worker runs during the
+test suite anyway) — and #20 additionally writes that upload to a local
+temp file before enqueuing it, since a background worker is a separate
+process from the request that received the upload.
+
+#21 adds a second async_task call, to projects.tasks.
+extract_decisions_and_actions, from the pasted_text and transcript_file
+branches below (the audio/video branch's own extraction call is enqueued
+later, from inside process_meeting_record itself — see
+tests/test_extraction.py) — every test below that reaches one of those two
+branches now expects that call instead of "no job enqueued".
 
 Mirrors tests/test_reveal.py and tests/test_discussion.py for fixture and
 naming conventions.
@@ -230,7 +237,7 @@ class TestMeetingUploadAccess(MeetingUploadTestBase):
 
 
 class TestMeetingUploadSubmission(MeetingUploadTestBase):
-    def test_pasted_text_creates_a_completed_record_with_no_job_enqueued(
+    def test_pasted_text_creates_a_completed_record_with_no_transcription_job_enqueued(
         self, client, django_user_model
     ):
         facilitator, _member, project = self._make_project_with_facilitator_and_member(
@@ -246,13 +253,19 @@ class TestMeetingUploadSubmission(MeetingUploadTestBase):
             )
 
         assert response.status_code == 302
-        mock_async_task.assert_not_called()
 
         record = MeetingRecord.objects.get(cycle=cycle)
         assert record.kind == MeetingRecord.Kind.PASTED_TEXT
         assert record.transcript_text == "Alice: let's start. Bob: sounds good."
         assert record.processing_state == MeetingRecord.ProcessingState.COMPLETED
         assert record.task_id == ""
+
+        # No transcription job (#19/#20) — there's nothing left to
+        # transcribe. #21's extraction job is enqueued instead, exactly
+        # once, against this record's own pk.
+        mock_async_task.assert_called_once_with(
+            "projects.tasks.extract_decisions_and_actions", record.pk
+        )
 
     def test_audio_upload_creates_a_pending_record_with_a_job_enqueued(
         self, client, django_user_model
@@ -326,7 +339,7 @@ class TestMeetingUploadSubmission(MeetingUploadTestBase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
-    def test_transcript_file_upload_creates_a_completed_record_with_no_job_enqueued(
+    def test_transcript_file_upload_creates_a_completed_record_with_no_transcription_job_enqueued(
         self, client, django_user_model
     ):
         # Retroactive fix made as part of #20 (see the comment on issue
@@ -348,13 +361,17 @@ class TestMeetingUploadSubmission(MeetingUploadTestBase):
             )
 
         assert response.status_code == 302
-        mock_async_task.assert_not_called()
 
         record = MeetingRecord.objects.get(cycle=cycle)
         assert record.kind == MeetingRecord.Kind.TRANSCRIPT_FILE
         assert record.transcript_text == "WEBVTT\n\nfake transcript"
         assert record.processing_state == MeetingRecord.ProcessingState.COMPLETED
         assert record.task_id == ""
+
+        # Same #21 extraction-job expectation as the pasted_text test above.
+        mock_async_task.assert_called_once_with(
+            "projects.tasks.extract_decisions_and_actions", record.pk
+        )
 
     def test_transcript_file_upload_with_invalid_utf8_is_rejected_as_a_form_error(
         self, client, django_user_model
@@ -568,9 +585,13 @@ class TestOneActiveProcessingRecordPerCycle(MeetingUploadTestBase):
         )
         client.force_login(facilitator)
 
-        response = client.post(
-            self._upload_url(project), {"pasted_text": "A pasted transcript."}
-        )
+        # #21 now enqueues an extraction job from this branch too — patched
+        # like every other test in this file, rather than letting a real
+        # Django-Q2 task get written to the ORM broker.
+        with patch("projects.views.async_task"):
+            response = client.post(
+                self._upload_url(project), {"pasted_text": "A pasted transcript."}
+            )
 
         assert response.status_code == 302
         assert MeetingRecord.objects.filter(cycle=cycle).count() == 2

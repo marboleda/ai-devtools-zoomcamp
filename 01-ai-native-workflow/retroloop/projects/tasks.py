@@ -13,6 +13,20 @@ both are written straight to ``processing_state=completed`` with
 only ever expects to run for ``kind in (audio, video)``; see
 ``process_meeting_record``'s docstring for what happens if it's ever called
 for anything else.
+
+#21 adds ``extract_decisions_and_actions``, a second Django-Q2 task that
+runs projects.extraction's AI call. It's enqueued from three places, never
+called inline in a request/response cycle or synchronously from within this
+module's own ``process_meeting_record``: this file's own success path
+below, and both the transcript_file and pasted_text branches of
+``projects.views.meeting_upload`` (their transcript is already known at
+upload time, but writing it still happens inside a request handler, and
+stack.md's own reasoning for keeping AI calls out of request handlers
+applies just as much to an extraction call as it does to transcription).
+Enqueuing consistently from all three call sites means "as soon as
+transcription finishes" (#21's own phrasing) always means the same thing
+regardless of which of the four MeetingRecord kinds produced that
+transcript.
 """
 import logging
 import os
@@ -20,7 +34,9 @@ import subprocess
 import tempfile
 
 import openai
+from django_q.tasks import async_task
 
+from .extraction import extract_decisions_and_actions_for_meeting_record
 from .models import MeetingRecord
 
 logger = logging.getLogger(__name__)
@@ -131,6 +147,28 @@ def process_meeting_record(meeting_record_id, temp_file_path):
         record.transcript_text = response.text
         record.processing_state = MeetingRecord.ProcessingState.COMPLETED
         record.save(update_fields=["transcript_text", "processing_state"])
+
+        # #21: extraction runs automatically as soon as transcription
+        # finishes, chained off this success path — never on a separate
+        # facilitator click, and never on the FAILED branch below.
+        # Enqueued as its own Django-Q2 task (like process_meeting_record
+        # itself) rather than called inline here, so the extraction call
+        # never blocks a background task's own already-committed success
+        # any more than it would block a request. A failure to *enqueue*
+        # (as opposed to a failure inside the extraction task itself,
+        # which projects.extraction already handles on its own) is logged
+        # but deliberately doesn't fall into the except block below — that
+        # would incorrectly overwrite this record's already-successful
+        # COMPLETED state with FAILED over a problem that has nothing to
+        # do with the transcription that just succeeded.
+        try:
+            async_task("projects.tasks.extract_decisions_and_actions", record.pk)
+        except Exception:
+            logger.exception(
+                "Failed to enqueue decision/action-item extraction for "
+                "meeting record %s",
+                record.pk,
+            )
     except Exception as exc:
         # Broad on purpose (per #20's constraints): an ffmpeg
         # CalledProcessError, any OpenAI SDK error, a file I/O error, or
@@ -143,3 +181,35 @@ def process_meeting_record(meeting_record_id, temp_file_path):
     finally:
         _safe_remove(temp_file_path)
         _safe_remove(extracted_audio_path)
+
+
+def extract_decisions_and_actions(meeting_record_id):
+    """#21: Django-Q2 task wrapper around
+    projects.extraction.extract_decisions_and_actions_for_meeting_record.
+
+    Enqueued from three places (never called inline in a request/response
+    cycle) — see this module's own docstring: process_meeting_record's
+    success path above, and both the transcript_file and pasted_text
+    branches of projects.views.meeting_upload.
+
+    All of #21's actual gating logic (transcript_text populated, at least
+    one discussed DiscussionTopic) and API-failure handling lives in
+    projects.extraction, the same split process_meeting_record above uses
+    with its own OpenAI call — this wrapper's only job is to look the
+    record up and hand it over. If the record no longer exists by the time
+    a worker picks this job up (deleted in the meantime, say), that's
+    logged and treated as a no-op rather than a crash, matching
+    process_meeting_record's own handling of the same situation.
+    """
+    try:
+        record = MeetingRecord.objects.select_related("cycle__project").get(
+            pk=meeting_record_id
+        )
+    except MeetingRecord.DoesNotExist:
+        logger.error(
+            "MeetingRecord %s no longer exists; nothing to extract from.",
+            meeting_record_id,
+        )
+        return
+
+    extract_decisions_and_actions_for_meeting_record(record)

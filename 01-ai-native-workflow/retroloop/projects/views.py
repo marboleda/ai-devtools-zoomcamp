@@ -1067,12 +1067,21 @@ def withdraw_card(request, pk, card_id):
 #
 # Retroactively adjusted by #20 (see the comment on issue #20 explaining
 # why): a transcript_file upload is now handled exactly like pasted_text —
-# read directly, straight to a completed MeetingRecord, no background job —
-# rather than #19's original PENDING + async_task behavior. Only audio/video
-# still enqueue projects.tasks.process_meeting_record, and #20 also added
-# writing that upload to a local temp file before enqueuing, since #19 never
-# persisted it anywhere and process_meeting_record runs in a separate worker
-# process.
+# read directly, straight to a completed MeetingRecord, no transcription
+# background job — rather than #19's original PENDING + async_task
+# behavior. Only audio/video still enqueue
+# projects.tasks.process_meeting_record, and #20 also added writing that
+# upload to a local temp file before enqueuing, since #19 never persisted
+# it anywhere and process_meeting_record runs in a separate worker process.
+#
+# #21 adds a second kind of background job, projects.tasks.
+# extract_decisions_and_actions, enqueued from all three of this view's
+# completion paths (pasted_text and transcript_file here, plus
+# process_meeting_record's own success path for audio/video) — see that
+# module's docstring. It runs independently of the "actively processing"
+# state tracked below, which only ever concerns transcription: a
+# pasted_text/transcript_file record is COMPLETED the moment it's created
+# and stays that way regardless of how its own extraction job turns out.
 
 
 def _meeting_upload_status_context(project, cycle):
@@ -1098,17 +1107,24 @@ def meeting_upload(request, pk, project, membership):
             kind = form.cleaned_data["kind"]
 
             if kind == MeetingRecord.Kind.PASTED_TEXT:
-                # No file, no background job: transcript_text is populated
-                # directly from the form and processing_state goes straight
-                # to completed — there is nothing left to process (#19's
-                # explicit decision), so this can never be "actively
-                # processing" and never blocks a later upload.
-                MeetingRecord.objects.create(
+                # No file, no transcription background job: transcript_text
+                # is populated directly from the form and processing_state
+                # goes straight to completed — there is nothing left to
+                # transcribe (#19's explicit decision), so this can never be
+                # "actively processing" and never blocks a later upload.
+                record = MeetingRecord.objects.create(
                     cycle=cycle,
                     kind=kind,
                     transcript_text=form.cleaned_data["pasted_text"],
                     processing_state=MeetingRecord.ProcessingState.COMPLETED,
                 )
+                # #21: extraction runs automatically as soon as the
+                # transcript is ready, never on a separate facilitator
+                # click. Enqueued as a Django-Q2 task rather than called
+                # inline here, same reasoning as the audio/video branch
+                # below: an AI call never runs synchronously inside a
+                # request/response cycle in this codebase.
+                async_task("projects.tasks.extract_decisions_and_actions", record.pk)
                 messages.success(request, "Transcript saved.")
                 return redirect("meeting_upload", pk=project.pk)
 
@@ -1116,9 +1132,9 @@ def meeting_upload(request, pk, project, membership):
                 # Retroactive fix for the #19/#20 contradiction flagged on
                 # #20: a .txt/.vtt/.srt upload's content already *is* the
                 # transcript, so this mirrors the pasted_text branch above
-                # exactly — read it directly, no background job, straight to
-                # completed, and (since it can never be non-terminal) no
-                # "actively processing" check either.
+                # exactly — read it directly, no transcription background
+                # job, straight to completed, and (since it can never be
+                # non-terminal) no "actively processing" check either.
                 uploaded_file = form.cleaned_data["file"]
                 try:
                     transcript_text = uploaded_file.read().decode("utf-8")
@@ -1129,11 +1145,15 @@ def meeting_upload(request, pk, project, membership):
                         "Please upload a plain-text transcript file.",
                     )
                 else:
-                    MeetingRecord.objects.create(
+                    record = MeetingRecord.objects.create(
                         cycle=cycle,
                         kind=kind,
                         transcript_text=transcript_text,
                         processing_state=MeetingRecord.ProcessingState.COMPLETED,
+                    )
+                    # #21: same reasoning as the pasted_text branch above.
+                    async_task(
+                        "projects.tasks.extract_decisions_and_actions", record.pk
                     )
                     messages.success(request, "Transcript saved.")
                     return redirect("meeting_upload", pk=project.pk)
