@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db import IntegrityError, transaction
@@ -1061,6 +1064,15 @@ def withdraw_card(request, pk, card_id):
 # ~3s htmx-polling pattern, just scoped to a small status fragment
 # (_meeting_upload_status_fragment.html) rather than the whole page, since
 # the form itself doesn't need to be re-rendered every poll.
+#
+# Retroactively adjusted by #20 (see the comment on issue #20 explaining
+# why): a transcript_file upload is now handled exactly like pasted_text —
+# read directly, straight to a completed MeetingRecord, no background job —
+# rather than #19's original PENDING + async_task behavior. Only audio/video
+# still enqueue projects.tasks.process_meeting_record, and #20 also added
+# writing that upload to a local temp file before enqueuing, since #19 never
+# persisted it anywhere and process_meeting_record runs in a separate worker
+# process.
 
 
 def _meeting_upload_status_context(project, cycle):
@@ -1100,30 +1112,72 @@ def meeting_upload(request, pk, project, membership):
                 messages.success(request, "Transcript saved.")
                 return redirect("meeting_upload", pk=project.pk)
 
-            # Only one MeetingRecord can be actively processing per cycle at
-            # a time (#19's decision) — a second audio/video/transcript_file
-            # upload while one is still pending/processing is rejected with
-            # a clear message, not queued behind it. Checked here, inside
-            # the same request that would otherwise create the second row,
-            # rather than left to the queue to sort out later.
-            if MeetingRecord.objects.active_processing_for_cycle(cycle=cycle).exists():
+            elif kind == MeetingRecord.Kind.TRANSCRIPT_FILE:
+                # Retroactive fix for the #19/#20 contradiction flagged on
+                # #20: a .txt/.vtt/.srt upload's content already *is* the
+                # transcript, so this mirrors the pasted_text branch above
+                # exactly — read it directly, no background job, straight to
+                # completed, and (since it can never be non-terminal) no
+                # "actively processing" check either.
+                uploaded_file = form.cleaned_data["file"]
+                try:
+                    transcript_text = uploaded_file.read().decode("utf-8")
+                except UnicodeDecodeError:
+                    form.add_error(
+                        None,
+                        "That transcript file isn't valid UTF-8 text. "
+                        "Please upload a plain-text transcript file.",
+                    )
+                else:
+                    MeetingRecord.objects.create(
+                        cycle=cycle,
+                        kind=kind,
+                        transcript_text=transcript_text,
+                        processing_state=MeetingRecord.ProcessingState.COMPLETED,
+                    )
+                    messages.success(request, "Transcript saved.")
+                    return redirect("meeting_upload", pk=project.pk)
+
+            # Only audio/video reach here. Only one MeetingRecord can be
+            # actively processing per cycle at a time (#19's decision) — a
+            # second upload while one is still pending/processing is
+            # rejected with a clear message, not queued behind it. Checked
+            # here, inside the same request that would otherwise create the
+            # second row, rather than left to the queue to sort out later.
+            elif MeetingRecord.objects.active_processing_for_cycle(cycle=cycle).exists():
                 form.add_error(
                     None,
                     "A meeting record is already being processed for this "
                     "cycle. Wait for it to finish before uploading another.",
                 )
             else:
+                uploaded_file = form.cleaned_data["file"]
                 record = MeetingRecord.objects.create(
                     cycle=cycle,
                     kind=kind,
                     processing_state=MeetingRecord.ProcessingState.PENDING,
                 )
-                # #20 will implement projects.tasks.process_meeting_record;
-                # django-q2 doesn't validate the dotted path at enqueue time,
-                # only when a worker picks the job up, so this is safe to
-                # enqueue against a stub today.
+                # #20: process_meeting_record runs in a separate worker
+                # process, potentially well after this request has finished
+                # — #19 never persisted the upload anywhere, so the
+                # request-scoped upload is gone by the time a worker would
+                # pick the job up. Written to a local temp file (never to
+                # the model, never permanently — stack.md's no-persistent-
+                # media rule) that both `web` and `worker` can reach via the
+                # shared volume stack.md's deployment section describes; for
+                # this codebase/tests that's just tempfile.gettempdir().
+                suffix = os.path.splitext(uploaded_file.name)[1]
+                fd, temp_path = tempfile.mkstemp(
+                    suffix=suffix, dir=tempfile.gettempdir()
+                )
+                with os.fdopen(fd, "wb") as temp_file:
+                    for chunk in uploaded_file.chunks():
+                        temp_file.write(chunk)
+
+                # django-q2 doesn't validate the dotted path at enqueue
+                # time, only when a worker picks the job up.
                 task_id = async_task(
-                    "projects.tasks.process_meeting_record", record.pk
+                    "projects.tasks.process_meeting_record", record.pk, temp_path
                 )
                 record.task_id = task_id or ""
                 record.save(update_fields=["task_id"])

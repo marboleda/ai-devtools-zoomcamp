@@ -1,16 +1,24 @@
 """Tests for #19: the facilitator-only meeting upload page.
 
 Submitting creates one MeetingRecord row for the project's active cycle,
-with `kind` set to the input type. Pasted text has nothing to process (no
-file, no background job) — transcript_text is populated directly and
-processing_state goes straight to "completed". Every other kind
-(audio/video/transcript_file) enqueues a Django-Q2 background job via
+with `kind` set to the input type. Pasted text and transcript_file both have
+nothing left to process (no background job needed) — transcript_text is
+populated directly (from the form, or by reading+decoding the uploaded file)
+and processing_state goes straight to "completed". This transcript_file
+behavior is a retroactive fix made as part of #20 (see the comment on issue
+#20): #19's original implementation queued transcript_file through the same
+background job as audio/video, contradicting #20's own acceptance criteria.
+Only audio/video now enqueue a Django-Q2 background job via
 django_q.tasks.async_task, which is patched rather than allowed to actually
-run (no worker runs during the test suite anyway).
+run (no worker runs during the test suite anyway) — and #20 additionally
+writes that upload to a local temp file before enqueuing it, since a
+background worker is a separate process from the request that received the
+upload.
 
 Mirrors tests/test_reveal.py and tests/test_discussion.py for fixture and
 naming conventions.
 """
+import os
 from unittest.mock import patch
 
 import pytest
@@ -277,6 +285,19 @@ class TestMeetingUploadSubmission(MeetingUploadTestBase):
         # this exact row up.
         assert args[1] == record.pk
 
+        # #20: the upload itself is written to a local temp file (since a
+        # background worker is a separate process from this request) and
+        # that path is passed to async_task as well, so
+        # process_meeting_record knows where to find the bytes.
+        temp_path = args[2]
+        try:
+            assert os.path.exists(temp_path)
+            with open(temp_path, "rb") as temp_file:
+                assert temp_file.read() == b"fake audio bytes"
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
     def test_video_upload_creates_a_pending_record_with_a_job_enqueued(
         self, client, django_user_model
     ):
@@ -287,7 +308,7 @@ class TestMeetingUploadSubmission(MeetingUploadTestBase):
         client.force_login(facilitator)
         upload = SimpleUploadedFile("standup.mp4", b"fake video bytes", content_type="video/mp4")
 
-        with patch("projects.views.async_task", return_value="task-456"):
+        with patch("projects.views.async_task", return_value="task-456") as mock_async_task:
             response = client.post(
                 self._upload_url(project), {"pasted_text": "", "file": upload}
             )
@@ -297,9 +318,21 @@ class TestMeetingUploadSubmission(MeetingUploadTestBase):
         assert record.kind == MeetingRecord.Kind.VIDEO
         assert record.processing_state == MeetingRecord.ProcessingState.PENDING
 
-    def test_transcript_file_upload_creates_a_pending_record_with_a_job_enqueued(
+        args, _kwargs = mock_async_task.call_args
+        temp_path = args[2]
+        try:
+            assert os.path.exists(temp_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_transcript_file_upload_creates_a_completed_record_with_no_job_enqueued(
         self, client, django_user_model
     ):
+        # Retroactive fix made as part of #20 (see the comment on issue
+        # #20): a transcript_file's content already *is* the transcript, so
+        # this now mirrors the pasted_text test above exactly, rather than
+        # #19's original PENDING + job-enqueued behavior.
         facilitator, _member, project = self._make_project_with_facilitator_and_member(
             django_user_model, "9"
         )
@@ -309,15 +342,72 @@ class TestMeetingUploadSubmission(MeetingUploadTestBase):
             "standup.vtt", b"WEBVTT\n\nfake transcript", content_type="text/vtt"
         )
 
-        with patch("projects.views.async_task", return_value="task-789"):
+        with patch("projects.views.async_task") as mock_async_task:
             response = client.post(
                 self._upload_url(project), {"pasted_text": "", "file": upload}
             )
 
         assert response.status_code == 302
+        mock_async_task.assert_not_called()
+
         record = MeetingRecord.objects.get(cycle=cycle)
         assert record.kind == MeetingRecord.Kind.TRANSCRIPT_FILE
-        assert record.processing_state == MeetingRecord.ProcessingState.PENDING
+        assert record.transcript_text == "WEBVTT\n\nfake transcript"
+        assert record.processing_state == MeetingRecord.ProcessingState.COMPLETED
+        assert record.task_id == ""
+
+    def test_transcript_file_upload_with_invalid_utf8_is_rejected_as_a_form_error(
+        self, client, django_user_model
+    ):
+        facilitator, _member, project = self._make_project_with_facilitator_and_member(
+            django_user_model, "9b"
+        )
+        self._make_active_cycle(project)
+        client.force_login(facilitator)
+        # 0xFF is not valid UTF-8 on its own.
+        upload = SimpleUploadedFile(
+            "standup.txt", b"\xff\xfe not valid utf-8", content_type="text/plain"
+        )
+
+        with patch("projects.views.async_task") as mock_async_task:
+            response = client.post(
+                self._upload_url(project), {"pasted_text": "", "file": upload}
+            )
+
+        assert response.status_code == 200
+        assert not MeetingRecord.objects.exists()
+        mock_async_task.assert_not_called()
+
+    def test_transcript_file_never_blocked_by_or_blocking_an_active_processing_record(
+        self, client, django_user_model
+    ):
+        # Same "never terminal, so never contends" guarantee #19 already
+        # gives pasted_text, extended to transcript_file by #20's fix.
+        facilitator, _member, project = self._make_project_with_facilitator_and_member(
+            django_user_model, "9c"
+        )
+        cycle = self._make_active_cycle(project)
+        MeetingRecord.objects.create(
+            cycle=cycle,
+            kind=MeetingRecord.Kind.AUDIO,
+            processing_state=MeetingRecord.ProcessingState.PENDING,
+        )
+        client.force_login(facilitator)
+        upload = SimpleUploadedFile(
+            "standup.srt", b"1\n00:00:00,000 --> 00:00:01,000\nHello", content_type="text/plain"
+        )
+
+        with patch("projects.views.async_task"):
+            response = client.post(
+                self._upload_url(project), {"pasted_text": "", "file": upload}
+            )
+
+        assert response.status_code == 302
+        assert MeetingRecord.objects.filter(cycle=cycle).count() == 2
+        transcript_record = MeetingRecord.objects.get(
+            cycle=cycle, kind=MeetingRecord.Kind.TRANSCRIPT_FILE
+        )
+        assert transcript_record.processing_state == MeetingRecord.ProcessingState.COMPLETED
 
     def test_unsupported_file_type_is_rejected_before_any_record_is_created(
         self, client, django_user_model
