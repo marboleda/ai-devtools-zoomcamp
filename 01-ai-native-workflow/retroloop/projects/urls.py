@@ -103,5 +103,10 @@ urlpatterns = [
         views.publish_summary,
         name="publish_summary",
     ),
+    path(
+        "<int:pk>/action-items/<int:item_id>/toggle/",
+        views.toggle_action_item_status,
+        name="toggle_action_item_status",
+    ),
     path("join/", views.join_project, name="join_project"),
 ]

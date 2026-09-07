@@ -673,6 +673,33 @@ class ActionItemQuerySet(models.QuerySet):
         """
         return self.filter(cycle=cycle, confirmed_at__isnull=False)
 
+    def open_for_published_cycles(self, *, project):
+        """Every ``status=open`` ActionItem across every *published* cycle
+        of ``project`` — #24's project-page listing, which per that issue's
+        own decision spans every cycle, not just the active one, but only
+        cycles that have actually been published: ``cycle.completed_at`` is
+        set only by #23's ``publish_summary``, alongside the cycle's
+        ``RetrospectiveSummary`` row, so this is equivalent to "the cycle
+        has a published summary" without an extra join.
+
+        Also requires ``confirmed_at`` to be set, the same gate
+        ``confirmed_for_cycle`` above uses: #22's review screen only ever
+        runs against a still-active cycle, so in the ordinary flow every
+        row belonging to an already-published cycle is confirmed by the
+        time it gets here. But nothing in this codebase actually forces a
+        facilitator to resolve every draft before publishing (#23 has no
+        such check), so an AI draft that was left unconfirmed and then
+        published-over should not surface here as a legitimate open action
+        item any more than it would in the published summary itself
+        (stack.md invariant #2).
+        """
+        return self.filter(
+            cycle__project=project,
+            cycle__completed_at__isnull=False,
+            confirmed_at__isnull=False,
+            status=self.model.Status.OPEN,
+        )
+
 
 ActionItemManager = models.Manager.from_queryset(ActionItemQuerySet)
 

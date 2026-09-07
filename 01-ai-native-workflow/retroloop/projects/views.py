@@ -160,6 +160,16 @@ def project_detail(request, pk):
             state=FeedbackCycle.State.CLOSED, summary__isnull=False
         ).order_by("-opens_at")
     )
+    # #24: every status=open ActionItem across every published cycle of the
+    # project, not just the active one — see
+    # ActionItem.objects.open_for_published_cycles' own docstring for why
+    # "published" is read from completed_at rather than re-checking for a
+    # RetrospectiveSummary row directly.
+    open_action_items = list(
+        ActionItem.objects.open_for_published_cycles(project=project)
+        .select_related("owner", "cycle")
+        .order_by("cycle__opens_at", "pk")
+    )
 
     return render(
         request,
@@ -172,6 +182,7 @@ def project_detail(request, pk):
             "member_count": member_count,
             "participation_count": participation_count,
             "published_cycles": published_cycles,
+            "open_action_items": open_action_items,
         },
     )
 
@@ -1593,3 +1604,61 @@ def publish_summary(request, pk, cycle_id, project, membership):
 
     messages.success(request, "Retrospective summary published.")
     return redirect("cycle_summary", pk=project.pk, cycle_id=cycle.pk)
+
+
+# -- #24: action item tracking on the project page --
+#
+# toggle_action_item_status is the one mutation #24 adds: the assigned
+# owner of a confirmed ActionItem can flip its status between open/done.
+# Per plan.md's role table this is granted to "them" — the owner
+# specifically, not the facilitator generically the way every other
+# mutation in this file is gated (@facilitator_required, or "any member").
+# So this is a plain ownership check, not a decorator: request.user must
+# be the exact row referenced by item.owner. An item with no owner
+# (owner_id is None) can never match request.user.id, so it's already
+# unreachable through this check — no separate "no owner" branch needed;
+# per #24's own decision, there's no claim flow for the MVP, it just stays
+# open until a facilitator assigns an owner (out of scope here, since
+# reusing #22's edit capability for an already-confirmed row is its own
+# separate piece of work #24 explicitly doesn't ask for).
+#
+# Only a *confirmed* ActionItem is reachable here (confirmed_at__isnull=
+# False in the lookup below) — an unconfirmed AI draft was never surfaced
+# to its would-be owner anywhere in the UI (#22's review screen is
+# facilitator-only), so there is nothing for a member to be toggling by
+# guessing an id.
+
+
+@login_required
+@require_POST
+def toggle_action_item_status(request, pk, item_id):
+    # Same single-query, indistinguishable-404 membership lookup used
+    # throughout: a non-member and a nonexistent project are both a plain
+    # 404.
+    membership = get_object_or_404(
+        Membership.objects.select_related("project"), project_id=pk, user=request.user
+    )
+    project = membership.project
+    item = get_object_or_404(
+        ActionItem.objects.select_related("cycle"),
+        pk=item_id,
+        cycle__project=project,
+        confirmed_at__isnull=False,
+    )
+
+    if item.owner_id is None or item.owner_id != request.user.id:
+        # Not the assigned owner (including the facilitator, unless they
+        # happen to also be the owner) — same 404 treatment as every other
+        # "not reachable through this app's own UI for you" case in this
+        # file, rather than a message that would confirm the item exists.
+        raise Http404
+
+    item.status = (
+        ActionItem.Status.DONE
+        if item.status == ActionItem.Status.OPEN
+        else ActionItem.Status.OPEN
+    )
+    item.save(update_fields=["status"])
+
+    messages.success(request, "Action item updated.")
+    return redirect("project_detail", pk=project.pk)

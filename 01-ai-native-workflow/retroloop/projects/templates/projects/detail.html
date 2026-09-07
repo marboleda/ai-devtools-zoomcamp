@@ -55,7 +55,26 @@
 
 <section>
   <h2>Open action items</h2>
-  <p><em>Placeholder — no action item functionality yet.</em></p>
+  {% if open_action_items %}
+  <ul>
+    {% for item in open_action_items %}
+    <li>
+      {{ item.description }}
+      {% if item.owner %} — {{ item.owner.username }}{% else %} — <em>unassigned</em>{% endif %}
+      {% if item.due_date %} (due {{ item.due_date }}){% endif %}
+      ({{ item.cycle.week }})
+      {% if item.owner_id == request.user.id %}
+      <form method="post" action="{% url 'toggle_action_item_status' project.pk item.pk %}" style="display:inline">
+        {% csrf_token %}
+        <button type="submit">Mark done</button>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p><em>No open action items.</em></p>
+  {% endif %}
 </section>
 
 <section>
