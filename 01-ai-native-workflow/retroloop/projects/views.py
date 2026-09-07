@@ -15,6 +15,7 @@ from .models import (
     Card,
     Cluster,
     CycleParticipation,
+    DiscussionTopic,
     FeedbackCycle,
     Membership,
     Project,
@@ -515,7 +516,7 @@ def split_cluster(request, pk, cluster_id):
 # per stack.md invariant #3, mirroring #10's Card.objects.visible_to.
 
 
-def _board_vote_context(project, cycle, viewer):
+def _board_vote_context(project, cycle, viewer, *, is_facilitator):
     clusters = list(cycle.clusters.order_by("position", "id"))
     # Only ever this viewer's own allocation — never an aggregate across
     # members, which Vote.objects.totals_for_cycle refuses to compute
@@ -524,12 +525,21 @@ def _board_vote_context(project, cycle, viewer):
         vote.cluster_id: vote.weight
         for vote in Vote.objects.for_member_in_cycle(cycle=cycle, member=viewer)
     }
-    # (cluster, this viewer's own weight on it) pairs — built here rather
-    # than left as a separate dict for the template to key into, the same
-    # way board_reveal's category_groups pre-pairs each category with its
-    # cards.
+    voting_closed = cycle.voting_closed_at is not None
+    # #17: once voting has closed, Vote.objects.totals_for_cycle no longer
+    # raises — every member (not just the facilitator) can now see each
+    # cluster's total here, the same board #16 kept totals off of while
+    # voting was open. Left as {} while voting is still open so this view
+    # never calls totals_for_cycle before close, matching #16's own
+    # behaviour exactly.
+    totals = Vote.objects.totals_for_cycle(cycle=cycle) if voting_closed else {}
+    # (cluster, this viewer's own weight on it, the cluster's total once
+    # voting is closed) triples — built here rather than left as separate
+    # dicts for the template to key into, the same way board_reveal's
+    # category_groups pre-pairs each category with its cards.
     clusters_with_own_votes = [
-        (cluster, own_votes.get(cluster.pk, 0)) for cluster in clusters
+        (cluster, own_votes.get(cluster.pk, 0), totals.get(cluster.pk, 0))
+        for cluster in clusters
     ]
     votes_used = sum(own_votes.values())
     return {
@@ -540,12 +550,15 @@ def _board_vote_context(project, cycle, viewer):
         "votes_used": votes_used,
         "votes_remaining": MAX_VOTE_WEIGHT_PER_MEMBER - votes_used,
         "max_vote_weight": MAX_VOTE_WEIGHT_PER_MEMBER,
-        "voting_closed": cycle.voting_closed_at is not None,
+        "voting_closed": voting_closed,
+        "is_facilitator": is_facilitator,
     }
 
 
-def _render_vote_fragment(request, project, cycle):
-    context = _board_vote_context(project, cycle, request.user)
+def _render_vote_fragment(request, project, cycle, *, is_facilitator):
+    context = _board_vote_context(
+        project, cycle, request.user, is_facilitator=is_facilitator
+    )
     return render(request, "projects/_board_vote_fragment.html", context)
 
 
@@ -559,9 +572,12 @@ def board_vote(request, pk):
     project = membership.project
     cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
     revealed = cycle is not None and cycle.revealed_at is not None
+    is_facilitator = membership.role == Membership.Role.FACILITATOR
 
     if revealed:
-        context = _board_vote_context(project, cycle, request.user)
+        context = _board_vote_context(
+            project, cycle, request.user, is_facilitator=is_facilitator
+        )
     else:
         context = {
             "project": project,
@@ -572,6 +588,7 @@ def board_vote(request, pk):
             "votes_remaining": None,
             "max_vote_weight": MAX_VOTE_WEIGHT_PER_MEMBER,
             "voting_closed": None,
+            "is_facilitator": is_facilitator,
         }
 
     # Same htmx poll-fragment convention as board_reveal/board_cluster: an
@@ -660,7 +677,66 @@ def cast_vote(request, pk, cluster_id):
                 vote_here.save(update_fields=["weight"])
         # else: retracting from a cluster with no vote on it is a no-op.
 
-    return _render_vote_fragment(request, project, cycle)
+    is_facilitator = membership.role == Membership.Role.FACILITATOR
+    return _render_vote_fragment(request, project, cycle, is_facilitator=is_facilitator)
+
+
+# -- #17: closing voting and ranking the discussion agenda --
+
+
+@facilitator_required
+@require_POST
+def close_voting(request, pk, project, membership):
+    """One-shot facilitator action (per #6) that closes voting and produces
+    the prioritized discussion agenda. Mirrors #12's reveal_cycle: a
+    single-action, facilitator-only transition, rejected if already done —
+    here the guard is read from ``voting_closed_at`` itself, the same field
+    the action sets, rather than from ``state`` (no view in this codebase
+    advances ``state`` past "revealed" yet).
+
+    Setting ``voting_closed_at`` is what makes
+    ``Vote.objects.totals_for_cycle`` (#16) stop raising ``VotingStillOpen``
+    — this view calls that method immediately afterwards to compute the
+    ranking, making it the first caller anywhere to see an aggregate vote
+    total for this cycle.
+
+    A ``DiscussionTopic`` row is created for every cluster in the cycle,
+    including a cluster with zero votes — per #17's decision, nothing is
+    dropped from the agenda; a zero-vote cluster simply sorts last. Ranked
+    by vote total descending, ties broken by cluster creation order
+    (``Cluster.pk`` ascending — plan.md specifies vote-based ranking but not
+    a tiebreak, so #17 picks the deterministic one).
+    """
+    cycle = project.cycles.exclude(state=FeedbackCycle.State.CLOSED).first()
+
+    if cycle is None or cycle.revealed_at is None:
+        messages.error(request, "This cycle hasn't been revealed yet.")
+        return redirect("project_detail", pk=project.pk)
+
+    if cycle.voting_closed_at is not None:
+        messages.error(request, "Voting is already closed for this cycle.")
+        return redirect("project_detail", pk=project.pk)
+
+    cycle.voting_closed_at = timezone.now()
+    cycle.save(update_fields=["voting_closed_at"])
+
+    totals = Vote.objects.totals_for_cycle(cycle=cycle)
+    # Cluster creation order = Cluster.pk order — Cluster carries no other
+    # ordering field that predates this, per #17's own guidance.
+    clusters_in_creation_order = list(cycle.clusters.order_by("pk"))
+    # sorted() is stable: ordering only by -total (descending) leaves
+    # clusters with equal totals in their original pk-ascending order,
+    # which is exactly the documented tiebreak.
+    ranked_clusters = sorted(
+        clusters_in_creation_order, key=lambda cluster: -totals.get(cluster.pk, 0)
+    )
+    DiscussionTopic.objects.bulk_create(
+        DiscussionTopic(cluster=cluster, rank=rank)
+        for rank, cluster in enumerate(ranked_clusters, start=1)
+    )
+
+    messages.success(request, "Voting closed. Discussion agenda is ready.")
+    return redirect("project_detail", pk=project.pk)
 
 
 @login_required

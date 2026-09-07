@@ -8,20 +8,30 @@ Deliberately no cluster vote totals anywhere on this fragment — not for
 this viewer, not for the facilitator, not for anyone — while voting is
 open. Vote.objects.totals_for_cycle (#16/#10's pattern) refuses to
 compute one before cycle.voting_closed_at is set, and this view never
-calls it at all; only each viewer's own vote weight on each cluster is
-ever shown here.
+calls it at all while open; only each viewer's own vote weight on each
+cluster is shown then. Once #17's close_voting action sets
+voting_closed_at, every member (not just the facilitator) sees each
+cluster's total below.
 {% endcomment %}
 {% if voting_closed %}
 <p>Voting is closed.</p>
 {% else %}
 <p>You have {{ votes_remaining }} of {{ max_vote_weight }} votes left.</p>
+{% if is_facilitator %}
+<form method="post" action="{% url 'close_voting' project.pk %}">
+  {% csrf_token %}
+  <button type="submit">Close voting</button>
+</form>
+{% endif %}
 {% endif %}
 
-{% for cluster, own_weight in clusters_with_own_votes %}
+{% for cluster, own_weight, total_weight in clusters_with_own_votes %}
 <section class="cluster" data-cluster-id="{{ cluster.pk }}">
   <h2>{{ cluster.name }}</h2>
   <p>Your votes here: {{ own_weight }}</p>
-  {% if not voting_closed %}
+  {% if voting_closed %}
+  <p>Total votes: {{ total_weight }}</p>
+  {% else %}
   <form method="post" action="{% url 'cast_vote' project.pk cluster.pk %}">
     {% csrf_token %}
     <input type="hidden" name="delta" value="1">

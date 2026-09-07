@@ -377,3 +377,52 @@ class Vote(models.Model):
 
     def __str__(self):
         return f"{self.member} — {self.weight} vote(s) on {self.cluster}"
+
+
+# -- #17: closing voting and ranking the discussion agenda --
+#
+# projects.views.close_voting is the one-shot facilitator action (per #6)
+# that sets FeedbackCycle.voting_closed_at, which is also the point at
+# which Vote.objects.totals_for_cycle (#16) stops raising VotingStillOpen.
+# It uses that exact method to build the ranking below.
+
+
+class DiscussionTopic(models.Model):
+    """(cluster, rank, outcome, notes) per stack.md — the prioritized
+    discussion agenda produced when a facilitator closes voting (#17). One
+    row is created for every cluster in the cycle, including a cluster with
+    zero votes: nothing is dropped from the agenda, a zero-vote cluster
+    simply sorts last. ``cluster`` is a one-to-one — closing voting is
+    itself one-shot (rejected once ``voting_closed_at`` is already set), so
+    a cluster never gets a second ``DiscussionTopic`` row.
+
+    ``rank`` is stored rather than left as query-time ordering, since
+    stack.md lists it as one of ``DiscussionTopic``'s own fields: 1 is the
+    top of the agenda. projects.views.close_voting computes it by ordering
+    clusters by vote total (from ``Vote.objects.totals_for_cycle``)
+    descending, breaking ties by cluster creation order — earlier
+    ``Cluster.pk`` first — since plan.md specifies vote-based ranking but
+    not a tiebreak.
+
+    ``outcome`` starts blank: nothing has been discussed yet at close-voting
+    time. Setting it to discussed/skipped/deferred, and writing ``notes``,
+    is a later issue's (#18) job — out of scope here.
+    """
+
+    class Outcome(models.TextChoices):
+        DISCUSSED = "discussed", "Discussed"
+        SKIPPED = "skipped", "Skipped"
+        DEFERRED = "deferred", "Deferred"
+
+    cluster = models.OneToOneField(
+        Cluster, on_delete=models.CASCADE, related_name="discussion_topic"
+    )
+    rank = models.PositiveIntegerField()
+    outcome = models.CharField(max_length=20, choices=Outcome.choices, blank=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["rank"]
+
+    def __str__(self):
+        return f"#{self.rank} — {self.cluster.name}"

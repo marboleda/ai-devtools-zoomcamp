@@ -35,6 +35,9 @@ urlpatterns = [
         views.cast_vote,
         name="cast_vote",
     ),
+    path(
+        "<int:pk>/cycles/close-voting/", views.close_voting, name="close_voting"
+    ),
     path("<int:pk>/cards/new/", views.create_card, name="create_card"),
     path("<int:pk>/cards/<int:card_id>/edit/", views.edit_card, name="edit_card"),
     path(
